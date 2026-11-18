@@ -178,7 +178,6 @@ def _fake_db_backend(monkeypatch, modules=None):
     """Stub the local pg tools; fake docker still runs."""
     _fake_docker_and_path(monkeypatch)
     monkeypatch.setattr(core, "_db_exists", lambda db: True)
-    monkeypatch.setattr(core, "_pg_tool", lambda tool, args: (0, b"", b""))
 
     def fake_dump(src_db, out_path):
         Path(out_path).write_bytes(

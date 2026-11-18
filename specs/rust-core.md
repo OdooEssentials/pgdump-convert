@@ -1,43 +1,50 @@
-# Rust core — spec
+# Rust core with Python bindings — spec
 
-**Status:** done (rules in Rust only)
+**Status:** future
 **Date:** 2026-02-14
-**Scope:** `native/` crate + `pgdump_convert/core.py` dispatch; CLI
-surface unchanged.
+**Scope:** `pgdump_convert/core.py` internals; CLI surface unchanged.
 
 ## Context
 
-The conversion pipeline is I/O-bound: streaming a multi-GB `dump.sql`
-through the transform line-by-line in Python is the hot path. Decision:
-the transform rules live **only in Rust** — no pure-Python copy to keep
-in sync.
+The conversion pipeline is I/O-bound today: streaming a multi-GB
+`dump.sql` through `_filter_dump` line-by-line in Python is the hot
+path, plus zip repacking. A native core would be faster and would let
+the tool be embedded by other programs.
 
-## Spec
+## Spec (when picked up)
 
-- `native/` is a PyO3/maturin crate built as `pgdump_convert._rs`.
-- It exposes `filter_dump(src, dst) -> int` (count of rewritten NOT
-  NULL constraints) implementing: `\restrict`/`\unrestrict` and
-  `SET transaction_timeout` drops, PG18 NOT NULL table-constraint
-  rewrite, COPY passthrough.
-- `core._filter_dump` calls the extension; a missing extension is a
-  clear `ClickException` (reinstall with a Rust toolchain or use a
-  prebuilt wheel).
-- Rules are added in `native/src/lib.rs` with `cargo test` coverage;
-  CI runs `cargo test` plus the Python suite on 3.10–3.14.
+- Implement the dump transformation (`_filter_dump`: restrict-strip,
+  `transaction_timeout` drop, PG18 NOT NULL rewrite) and the
+  restore/re-dump orchestration in Rust.
+- Expose it to Python via PyO3 bindings; the `pgdump-convert` CLI keeps
+  working unchanged on top of the bindings.
+- Docker orchestration may stay in Python initially — the Rust core
+  covers the streaming text transform first.
+- Acceptance: identical output zips for the existing test corpus; the
+  Python test suite keeps passing against the bindings.
 
 ## Alternatives considered
 
-- **Rewrite the whole CLI in Rust** — rejected: the CLI is thin and the
-  Python interface/ecosystem is worth keeping.
-- **Pure-Python fallback** — rejected: two implementations of the rules
-  would drift; the extension is required instead.
+- **Keep pure Python** — acceptable now; revisit if profiling shows the
+  filter is a bottleneck on real dumps.
+- **Rewrite the whole CLI in Rust** — rejected for now: the CLI is thin
+  and Python bindings preserve the existing interface and ecosystem.
 
 ## Tasks
 
-- [x] Rust crate + PyO3 bindings for `filter_dump`
-- [x] Python dispatch; missing extension errors clearly
-- [x] Rust unit tests + CI (`cargo test`, pytest matrix)
-- [ ] Benchmark the native transform on a realistic multi-GB dump and
-      record numbers in README
-- [ ] Consider moving zip staging / container orchestration into Rust
-      later if profiling justifies it
+- [x] Profile `_filter_dump` on a realistic multi-GB dump — done on the
+      2.7 GB `vinha-odoo` PG18 dump: Rust 2.9 s vs Python 3.7 s (**1.3×**,
+      byte-identical output). The pipeline is I/O-bound (~5.4 GB
+      read+write), so the transform is not the bottleneck.
+- [x] ~~Rust crate + PyO3 bindings~~ — implemented then **reverted**:
+      the speedup did not justify a required Rust toolchain. Python
+      `LINE_RULES`/`BLOCK_RULES` remain the single implementation.
+- [ ] Revisit only if profiling shows the transform (not docker/psql
+      I/O) dominates on real workloads, or if the tool is embedded by
+      other programs
+
+---
+
+_Note: the parent feature spec lives in `dreispt/osh-contrib` at
+`specs/pgconvert-db-export.md`; this repo mirrors that conversion
+logic standalone._
