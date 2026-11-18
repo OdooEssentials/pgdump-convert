@@ -192,6 +192,44 @@ def test_allow_restore_errors_continues(tmp_path, monkeypatch):
     assert out.exists()
 
 
+def _fake_docker_fatal_restore(args, **kwargs):
+    """Fake docker whose psql restore dies with a nonzero exit code.
+
+    Fatal psql errors print lowercase ``psql: error:`` — they never
+    produce ``ERROR:`` lines, so only the exit code can catch them.
+    """
+    if kwargs.get("stdout") is not None and hasattr(kwargs["stdout"], "write"):
+        if "pg_dump" in args:
+            kwargs["stdout"].write(b"-- pg_dump 16 output\n")
+        elif "psql" in args and "-f" in args:
+            kwargs["stdout"].write(
+                b"psql: error: connection to server on socket failed\n"
+            )
+            return _cp(args, rc=2)
+        return _cp(args)
+    return _fake_docker(args, **kwargs)
+
+
+def test_fatal_restore_error_fails_even_with_flag(tmp_path, monkeypatch):
+    """A nonzero psql exit (dead container, lost connection) aborts the
+    conversion — --allow-restore-errors only covers per-statement
+    ERROR lines, not a failed restore."""
+    src = tmp_path / "backup.zip"
+    out = tmp_path / "backup-pg16.zip"
+    _make_backup(src)
+    monkeypatch.setattr(core, "_run", _fake_docker_fatal_restore)
+    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/" + name)
+
+    result = CliRunner().invoke(
+        main,
+        [str(src), str(out), "--to", "16", "--allow-restore-errors"],
+    )
+
+    assert result.exit_code != 0
+    assert "exit code" in result.output
+    assert not out.exists()
+
+
 def test_dry_run_needs_no_docker(tmp_path, monkeypatch):
     """--dry-run reports the plan without requiring docker."""
     src = tmp_path / "backup.zip"

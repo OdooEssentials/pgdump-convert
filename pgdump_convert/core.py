@@ -253,23 +253,31 @@ def _wait_ready(container):
 
 
 def _restore(container, db_name, dump_file, log_path, allow_errors=False):
-    _run(["cp", str(dump_file), f"{container}:/tmp/dump.sql"])
+    cp = _run(["cp", str(dump_file), f"{container}:/tmp/dump.sql"])
+    if cp.returncode != 0:
+        raise click.ClickException(
+            f"docker cp failed: {cp.stderr.decode(errors='replace')[:300]}"
+        )
     with open(log_path, "wb") as log:
-        _docker_exec(
+        result = _docker_exec(
             container,
             ["psql", "-U", "postgres", "-d", db_name, "-f", "/tmp/dump.sql"],
             capture=False,
             stdout=log,
             stderr=subprocess.STDOUT,
         )
-    errors = [
-        line
-        for line in log_path.read_text(errors="replace").splitlines()
-        if "ERROR:" in line
-    ]
+    lines = log_path.read_text(errors="replace").splitlines()
+    errors = [line for line in lines if "ERROR:" in line]
     _info(f"psql reported {len(errors)} ERROR line(s)")
     for line in errors[-5:]:
         _warning(f"  {line}")
+    if result.returncode != 0:
+        # Fatal psql errors (connection loss, missing file) exit nonzero
+        # and are not covered by --allow-restore-errors.
+        raise click.ClickException(
+            f"psql restore failed with exit code {result.returncode}:\n"
+            + "\n".join(lines[-5:])
+        )
     if errors and not allow_errors:
         raise click.ClickException(
             f"restore reported {len(errors)} ERROR line(s); the dump may "
@@ -303,6 +311,11 @@ def _redump(container, db_name, raw_path, out_path):
         container,
         ["psql", "-U", "postgres", "-tA", "-c", "SHOW server_version"],
     )
+    if result.returncode != 0:
+        raise click.ClickException(
+            "could not read server_version from container: "
+            + result.stderr.decode(errors="replace")[:300]
+        )
     return result.stdout.decode().strip().split()[0]
 
 
