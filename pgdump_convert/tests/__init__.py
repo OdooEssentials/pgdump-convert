@@ -1,0 +1,1 @@
+"""Tests for pgdump-convert."""

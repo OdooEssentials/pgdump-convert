@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pgdump-convert"
+version = "0.1.0"
+description = "Convert PostgreSQL dumps to a different server major version"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["click>=8.0"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+pgdump-convert = "pgdump_convert.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["pgdump_convert*"]
+
+[tool.pytest.ini_options]
+testpaths = ["pgdump_convert/tests"]
