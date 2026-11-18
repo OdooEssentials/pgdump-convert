@@ -42,6 +42,20 @@ that older servers reject:
 
 Requires docker. The container is always removed afterwards.
 
+### Adding a transform rule
+
+Version-compatibility quirks live in `pgdump_convert/core.py` as two
+registries, both applied while streaming the dump (COPY payloads are
+never touched):
+
+- **`LINE_RULES`** — per-line drop/rewrite. Append
+  `LineRule("name", PATTERN, replacement)`; `replacement=None` drops the
+  line, otherwise the match is expanded with `re.Match.expand`
+  (`\g<name>` groups work).
+- **`BLOCK_RULES`** — multi-line statement transforms. Subclass
+  `BlockRule` (`starts`/`feed`/`emit`) and register the class, e.g. the
+  `Pg18NotNull` rule that rewrites CREATE TABLE bodies.
+
 ## Install
 
 ```

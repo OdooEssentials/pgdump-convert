@@ -31,9 +31,13 @@ pgdump-convert [INPUT] [OUTPUT] [--to 16] [--image IMAGE]
 - Output is always an Odoo-format zip: plain-SQL `dump.sql`, optional
   `filestore/`, `manifest.json` with `pg_version` set to the target
   server version.
-- `_filter_dump` rewrites/drops constructs older clients reject:
+- `_filter_dump` applies registered rules so version quirks are easy to
+  add: `LINE_RULES` (per-line drop/rewrite via `LineRule`) and
+  `BLOCK_RULES` (multi-line statement transforms via `BlockRule`
+  subclasses, e.g. `Pg18NotNull`). Rules rewrite/drop:
   `\restrict`/`\unrestrict`, `SET transaction_timeout`, PG18 NOT NULL
-  table constraints → `ALTER TABLE ... SET NOT NULL`.
+  table constraints → `ALTER TABLE ... SET NOT NULL`. COPY payloads
+  pass through untouched.
 - The docker container is always removed (`try/finally`); `--dry-run`
   needs no docker or pg tools.
 

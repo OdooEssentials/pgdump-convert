@@ -8,21 +8,138 @@ import subprocess
 import tempfile
 import time
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 
 import click
 
+COPY_RE = re.compile(rb"^COPY\s")
+
+
+# --- dump transform rules ----------------------------------------------------
+#
+# ``_filter_dump`` streams the dump through two kinds of rules so new
+# PostgreSQL-version quirks are a few lines to add:
+#
+# - LINE_RULES: per-line filters. Add ``LineRule(name, pattern,
+#   replacement)``; ``replacement=None`` drops the line, otherwise the
+#   match is expanded via ``re.Match.expand`` (``\\g<name>`` groups work).
+# - BLOCK_RULES: multi-line statement transforms. Subclass ``BlockRule``,
+#   implement ``starts``/``feed``/``emit``, and register the class in
+#   ``BLOCK_RULES``.
+
+
+@dataclass(frozen=True)
+class LineRule:
+    """Drop or rewrite lines matching ``pattern``.
+
+    ``replacement=None`` drops the line; otherwise the match is expanded
+    with ``re.Match.expand`` so ``\\g<name>``/``\\1`` groups are allowed.
+    """
+
+    name: str
+    pattern: re.Pattern
+    replacement: bytes | None = None
+
+    def apply(self, line):
+        m = self.pattern.match(line)
+        if m is None:
+            return line
+        return None if self.replacement is None else m.expand(self.replacement)
+
+
 RESTRICT_RE = re.compile(rb"^\\(?:un)?restrict [A-Za-z0-9]+\s*$")
+SET_TIMEOUT_RE = re.compile(rb"^SET\s+transaction_timeout\s*=")
+
+LINE_RULES = [
+    # psql <17.6 cannot parse these meta-commands emitted by pg_dump 17.6+.
+    LineRule("restrict-unrestrict", RESTRICT_RE),
+    # transaction_timeout was added in PG17; older servers reject the SET.
+    LineRule("transaction-timeout", SET_TIMEOUT_RE),
+]
+
+
+class BlockRule:
+    """Buffer one multi-line SQL statement and emit its replacement.
+
+    ``starts(line)`` returns True on the statement's first line and
+    initializes state; ``feed(line)`` buffers each line (including the
+    first) and returns True once the statement is complete; ``emit()``
+    returns the replacement bytes. ``dropped`` counts rewritten elements
+    for the end-of-run warning.
+    """
+
+    dropped = 0
+
+    def starts(self, line):
+        raise NotImplementedError
+
+    def feed(self, line):
+        raise NotImplementedError
+
+    def emit(self):
+        raise NotImplementedError
+
+
 # PG18 emits NOT NULL as named table constraints; PG<=17 rejects them.
 PG18_NOT_NULL_RE = re.compile(
     rb'^\s*(?:CONSTRAINT\s+\w+\s+)?NOT\s+NULL\s+("[^"]+"|\w+),?\s*$'
 )
-SET_TIMEOUT_RE = re.compile(rb"^SET\s+transaction_timeout\s*=")
-COPY_RE = re.compile(rb"^COPY\s")
 CREATE_TABLE_RE = re.compile(
     rb"^CREATE\s+(?:UNLOGGED\s+|TEMP(?:ORARY)?\s+)?TABLE\s+(?:IF NOT EXISTS\s+)?"
     rb'((?:"[^"]+"|[\w]+)(?:\.(?:"[^"]+"|[\w]+))?)\s*\('
 )
+
+
+class Pg18NotNull(BlockRule):
+    """Rewrite PG18 ``[CONSTRAINT name] NOT NULL col`` table elements.
+
+    They are moved into ``ALTER TABLE ONLY <table> ALTER COLUMN <col>
+    SET NOT NULL;`` statements after the CREATE TABLE.
+    """
+
+    def __init__(self):
+        self._buf = []
+        self._table = None
+        self._cols = []
+        self.dropped = 0
+
+    def starts(self, line):
+        m = CREATE_TABLE_RE.match(line)
+        if m is None:
+            return False
+        self._table = m.group(1)
+        self._buf = []
+        self._cols = []
+        return True
+
+    def feed(self, line):
+        self._buf.append(line)
+        return line.rstrip().endswith(b";")
+
+    def emit(self):
+        out = bytearray()
+        for buf_line in self._buf:
+            m = PG18_NOT_NULL_RE.match(buf_line)
+            if m:
+                self._cols.append(m.group(1))
+                self.dropped += 1
+                continue
+            out += buf_line
+        for col in self._cols:
+            out += (
+                b"ALTER TABLE ONLY "
+                + self._table
+                + b" ALTER COLUMN "
+                + col
+                + b" SET NOT NULL;\n"
+            )
+        self._buf = []
+        self._cols = []
+        return bytes(out)
+
+
+BLOCK_RULES = [Pg18NotNull]
 
 
 def _info(msg):
@@ -80,21 +197,15 @@ def _import_sql(path, work):
 
 
 def _filter_dump(src, dst):
-    """Copy *src* to *dst* making it importable by older PostgreSQL clients.
+    """Copy *src* to *dst* applying the registered transform rules.
 
-    Streams line by line so multi-GB dumps don't exhaust memory. Drops:
-
-    - ``\\restrict``/``\\unrestrict`` meta-commands (psql <17.6);
-    - ``SET transaction_timeout`` (GUC added in PG17);
-    - PG18 table-level ``[CONSTRAINT name] NOT NULL col`` elements, which
-      are rewritten as ``ALTER TABLE ... ALTER COLUMN ... SET NOT NULL``
-      after the CREATE TABLE (PG<=17 rejects the inline syntax).
+    Streams line by line so multi-GB dumps don't exhaust memory. COPY
+    payloads pass through untouched; line rules (``LINE_RULES``) and
+    block rules (``BLOCK_RULES``) do the rewriting.
     """
-    dropped_nn = 0
     in_copy = False
-    table_buf = None
-    table_name = None
-    nn_cols = []
+    block = None
+    blocks = [cls() for cls in BLOCK_RULES]
     with open(src, "rb") as fin, open(dst, "wb") as fout:
         for line in fin:
             if in_copy:
@@ -102,46 +213,32 @@ def _filter_dump(src, dst):
                 if line.rstrip(b"\r\n") == b"\\.":
                     in_copy = False
                 continue
-            if table_buf is not None:
-                table_buf.append(line)
-                if not line.rstrip().endswith(b";"):
-                    continue
-                for buf_line in table_buf:
-                    m = PG18_NOT_NULL_RE.match(buf_line)
-                    if m:
-                        nn_cols.append(m.group(1))
-                        dropped_nn += 1
-                        continue
-                    fout.write(buf_line)
-                for col in nn_cols:
-                    fout.write(
-                        b"ALTER TABLE ONLY "
-                        + table_name
-                        + b" ALTER COLUMN "
-                        + col
-                        + b" SET NOT NULL;\n"
-                    )
-                table_buf = None
-                nn_cols = []
+            if block is not None:
+                if block.feed(line):
+                    fout.write(block.emit())
+                    block = None
                 continue
-            if RESTRICT_RE.match(line) or SET_TIMEOUT_RE.match(line):
+            for rule in LINE_RULES:
+                line = rule.apply(line)
+                if line is None:
+                    break
+            if line is None:
                 continue
             if COPY_RE.match(line):
                 in_copy = True
-            m = CREATE_TABLE_RE.match(line)
-            if m:
-                table_buf = [line]
-                table_name = m.group(1)
-                if line.rstrip().endswith(b";"):
-                    # single-line CREATE TABLE — flush immediately
-                    for buf_line in table_buf:
-                        fout.write(buf_line)
-                    table_buf = None
-                continue
-            fout.write(line)
-    if dropped_nn:
+            for rule in blocks:
+                if rule.starts(line):
+                    block = rule
+                    if rule.feed(line):
+                        fout.write(rule.emit())
+                        block = None
+                    break
+            else:
+                fout.write(line)
+    dropped = sum(r.dropped for r in blocks)
+    if dropped:
         _warning(
-            f"rewrote {dropped_nn} PG18 NOT NULL table constraint(s) "
+            f"rewrote {dropped} table-level NOT NULL constraint(s) "
             "as ALTER TABLE ... SET NOT NULL"
         )
 
