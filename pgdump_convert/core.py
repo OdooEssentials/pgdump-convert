@@ -13,6 +13,11 @@ from pathlib import Path
 
 import click
 
+try:
+    from pgdump_convert import _rs as _native
+except ImportError:  # pragma: no cover - native ext is optional
+    _native = None
+
 COPY_RE = re.compile(rb"^COPY\s")
 
 
@@ -199,10 +204,25 @@ def _import_sql(path, work):
 def _filter_dump(src, dst):
     """Copy *src* to *dst* applying the registered transform rules.
 
-    Streams line by line so multi-GB dumps don't exhaust memory. COPY
-    payloads pass through untouched; line rules (``LINE_RULES``) and
-    block rules (``BLOCK_RULES``) do the rewriting.
+    Uses the Rust extension (``pgdump_convert._rs``) when available and
+    falls back to the pure-Python pipeline otherwise. Both stream line by
+    line so multi-GB dumps don't exhaust memory; COPY payloads pass
+    through untouched.
     """
+    if _native is not None:
+        dropped = _native.filter_dump(str(src), str(dst))
+        if dropped:
+            _warning(
+                f"rewrote {dropped} table-level NOT NULL constraint(s) "
+                "as ALTER TABLE ... SET NOT NULL"
+            )
+        return
+    _filter_dump_python(src, dst)
+
+
+def _filter_dump_python(src, dst):
+    """Pure-Python fallback for ``_filter_dump`` (see ``LINE_RULES`` and
+    ``BLOCK_RULES`` above)."""
     in_copy = False
     block = None
     blocks = [cls() for cls in BLOCK_RULES]

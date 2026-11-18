@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
 
 [project]
 name = "pgdump-convert"
@@ -16,8 +16,10 @@ test = ["pytest>=7"]
 [project.scripts]
 pgdump-convert = "pgdump_convert.cli:main"
 
-[tool.setuptools.packages.find]
-include = ["pgdump_convert*"]
+[tool.maturin]
+manifest-path = "native/Cargo.toml"
+python-source = "."
+module-name = "pgdump_convert._rs"
 
 [tool.pytest.ini_options]
 testpaths = ["pgdump_convert/tests"]

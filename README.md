@@ -42,6 +42,10 @@ that older servers reject:
 
 Requires docker. The container is always removed afterwards.
 
+The dump transform runs in a Rust extension (`pgdump_convert._rs`,
+PyO3/maturin) when built; otherwise the identical pure-Python pipeline
+is used, so the CLI works from a plain `pip install` too.
+
 ### Adding a transform rule
 
 Version-compatibility quirks live in `pgdump_convert/core.py` as two
@@ -56,6 +60,10 @@ never touched):
   `BlockRule` (`starts`/`feed`/`emit`) and register the class, e.g. the
   `Pg18NotNull` rule that rewrites CREATE TABLE bodies.
 
+Note: the Rust extension (`native/`) mirrors the built-in rules for
+speed. When you add a rule here, port it to `native/src/lib.rs` too —
+or wait for the bindings work in `specs/rust-core.md`.
+
 ## Install
 
 ```
@@ -65,12 +73,19 @@ pip install pgdump-convert   # or: pipx install pgdump-convert
 ## Development
 
 ```
-python -m venv .venv && .venv/bin/pip install -e '.[test]'
-.venv/bin/python -m pytest
+# Rust toolchain required for the native extension (optional: the
+# pure-Python fallback is used when it is absent)
+pip install maturin
+pip install -e '.[test]'
+python -m pytest
 ```
+
+The Rust core lives in `native/` and is built by maturin as
+`pgdump_convert._rs`. CI builds it on every Python version and also
+runs the suite once without it to cover the fallback.
 
 ## Roadmap
 
-- Reimplement the dump-filtering internals in Rust and expose them to
-  the Python CLI through bindings (e.g. PyO3), keeping the Python
-  script as the interface. See `specs/rust-core.md`.
+- Expose the rule registries (`LINE_RULES`/`BLOCK_RULES`) through the
+  Rust bindings so new transforms can be added in one place. See
+  `specs/rust-core.md`.
