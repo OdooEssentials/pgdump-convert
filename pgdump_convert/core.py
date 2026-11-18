@@ -330,9 +330,7 @@ def _write_zip(work, output, pg_version):
     _success(f"wrote {output}")
 
 
-def _convert_work(
-    work, output, image, db_name, container, allow_restore_errors=False
-):
+def _convert_work(work, output, image, db_name, container, allow_restore_errors=False):
     """Run the throwaway-container conversion on ``work/dump.sql``.
 
     ``work`` may also hold ``manifest.json`` and ``filestore/``; they are
@@ -362,9 +360,7 @@ def _convert_work(
         _wait_ready(container)
         _docker_exec(container, ["createdb", "-U", "postgres", db_name])
         _info("restoring dump")
-        _restore(
-            container, db_name, dump_in, work / "psql.log", allow_restore_errors
-        )
+        _restore(container, db_name, dump_in, work / "psql.log", allow_restore_errors)
         _info(f"re-dumping with pg_dump from {image}")
         server_version = _redump(
             container, db_name, work / "dump-raw.sql", work / "dump-new.sql"
@@ -425,9 +421,7 @@ def convert(
             _import_sql(zip_path, work)
         if filestore_dir:
             stage_filestore(filestore_dir, work)
-        _convert_work(
-            work, output, image, db_name, container, allow_restore_errors
-        )
+        _convert_work(work, output, image, db_name, container, allow_restore_errors)
 
 
 def _pg_tool(tool, args):
@@ -537,9 +531,7 @@ def convert_db(
         if filestore_dir:
             stage_filestore(filestore_dir, work)
         _write_source_manifest(src_db, work)
-        _convert_work(
-            work, output, image, db_name, container, allow_restore_errors
-        )
+        _convert_work(work, output, image, db_name, container, allow_restore_errors)
 
 
 def stage_filestore(filestore_dir, work):

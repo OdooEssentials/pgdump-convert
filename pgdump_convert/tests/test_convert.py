@@ -155,9 +155,7 @@ def _fake_docker_restore_errors(args, **kwargs):
         if "pg_dump" in args:
             kwargs["stdout"].write(b"-- pg_dump 16 output\nCREATE TABLE t(id int);\n")
         elif "psql" in args and "-f" in args:
-            kwargs["stdout"].write(
-                b"ERROR:  relation \"missing_table\" does not exist\n"
-            )
+            kwargs["stdout"].write(b'ERROR:  relation "missing_table" does not exist\n')
         return _cp(args)
     return _fake_docker(args, **kwargs)
 

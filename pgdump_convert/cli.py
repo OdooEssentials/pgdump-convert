@@ -57,7 +57,14 @@ from . import core
 )
 @click.version_option()
 def main(
-    input, output, to, image, db_name, from_db, filestore_dir, dry_run,
+    input,
+    output,
+    to,
+    image,
+    db_name,
+    from_db,
+    filestore_dir,
+    dry_run,
     allow_restore_errors,
 ):
     """Convert a PostgreSQL dump to a different server major version.
