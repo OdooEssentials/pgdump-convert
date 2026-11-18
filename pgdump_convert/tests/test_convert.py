@@ -1,5 +1,6 @@
 """Tests for the ``pgdump-convert`` CLI and conversion pipeline."""
 
+import io
 import json
 import subprocess
 import zipfile
@@ -242,14 +243,50 @@ def test_dry_run_needs_no_docker(tmp_path, monkeypatch):
     assert "postgres:16" in result.output
 
 
-def test_no_input_errors(tmp_path, monkeypatch):
-    """No INPUT and no --from-db is an error."""
-    monkeypatch.chdir(tmp_path)
+def test_stdin_to_stdout_roundtrip(tmp_path, monkeypatch):
+    """With no positional args the dump is read from stdin and the zip
+    written to stdout — both binary-safe."""
+    src = tmp_path / "backup.zip"
+    _make_backup(src)
+    _fake_docker_and_path(monkeypatch)
 
-    result = CliRunner().invoke(main, [])
+    result = CliRunner().invoke(main, ["--to", "16"], input=src.read_bytes())
+
+    assert result.exit_code == 0, result.output
+    with zipfile.ZipFile(io.BytesIO(result.stdout_bytes)) as zf:
+        assert "dump.sql" in zf.namelist()
+        assert b"CREATE TABLE t(id int);" in zf.read("dump.sql")
+
+
+def test_explicit_stdin_stdout(tmp_path, monkeypatch):
+    """'-' selects stdin/stdout explicitly, same as omitting them."""
+    src = tmp_path / "dump.sql"
+    src.write_text("CREATE TABLE t(id int);\n")
+    _fake_docker_and_path(monkeypatch)
+
+    result = CliRunner().invoke(main, ["-", "-", "--to", "16"], input=src.read_bytes())
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout_bytes.startswith(b"PK")
+
+
+def test_empty_stdin_errors(tmp_path, monkeypatch):
+    """An empty stdin stream fails instead of producing an empty dump."""
+    _fake_docker_and_path(monkeypatch)
+
+    result = CliRunner().invoke(main, ["--to", "16"], input=b"")
 
     assert result.exit_code != 0
-    assert "Nothing to convert" in result.output
+    assert "empty" in result.output
+
+
+def test_no_input_errors(tmp_path, monkeypatch):
+    """No INPUT, no stdin data and no --from-db is an error."""
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(main, [], input=b"")
+
+    assert result.exit_code != 0
 
 
 # --- database source --------------------------------------------------------

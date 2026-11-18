@@ -18,14 +18,18 @@ CLI.
 ```
 pgdump-convert [INPUT] [OUTPUT] [--to 16] [--image IMAGE]
                [--container-db NAME] [--from-db NAME] [--filestore DIR]
-               [--dry-run]
+               [--dry-run] [--allow-restore-errors]
 ```
 
-- `INPUT`: Odoo zip backup or plain `pg_dump -Fp` `.sql` file.
-  `pg_dump -Fc` custom format → clear error.
+- `INPUT` defaults to **stdin** (`-` explicit); Odoo zip backup or
+  plain `pg_dump -Fp` `.sql` file. `pg_dump -Fc` custom format → clear
+  error. Bare invocation on a TTY errors instead of blocking.
+- `OUTPUT` defaults to **stdout** (`-` explicit); the zip is streamed
+  binary-safe and all log messages go to stderr.
 - `--from-db NAME`: dump via local `pg_dump` (libpq env applies);
   synthesizes `manifest.json` with installed modules from
-  `ir_module_module`. First positional becomes the OUTPUT path.
+  `ir_module_module`. First positional becomes the OUTPUT path
+  (defaults to stdout).
 - `--filestore DIR`: bundle a directory as `filestore/` in the zip
   (works with file and DB sources).
 - Output is always an Odoo-format zip: plain-SQL `dump.sql`, optional

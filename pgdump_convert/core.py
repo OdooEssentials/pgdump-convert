@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import zipfile
@@ -151,7 +152,8 @@ def _warning(msg):
 
 
 def _success(msg):
-    click.secho(msg, fg="green")
+    # stderr: stdout may carry the binary zip.
+    click.secho(msg, fg="green", err=True)
 
 
 def _run(args, *, capture=True, **kwargs):
@@ -320,7 +322,10 @@ def _redump(container, db_name, raw_path, out_path):
 
 
 def _write_zip(work, output, pg_version):
-    """Repack dump.sql + filestore/ + manifest.json into the output zip."""
+    """Repack dump.sql + filestore/ + manifest.json into the output zip.
+
+    ``output == "-"`` streams the zip to stdout.
+    """
     manifest_path = work / "manifest.json"
     manifest = {}
     if manifest_path.exists():
@@ -328,7 +333,9 @@ def _write_zip(work, output, pg_version):
     if manifest:
         manifest["pg_version"] = pg_version
         manifest_path.write_text(json.dumps(manifest, indent=4))
-    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
+    to_stdout = str(output) == "-"
+    target = work / "output.zip" if to_stdout else Path(output)
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as zf:
         if manifest:
             zf.write(manifest_path, "manifest.json")
         filestore = work / "filestore"
@@ -340,7 +347,12 @@ def _write_zip(work, output, pg_version):
                         "filestore/" + path.relative_to(filestore).as_posix(),
                     )
         zf.write(work / "dump-new.sql", "dump.sql")
-    _success(f"wrote {output}")
+    if to_stdout:
+        with open(target, "rb") as f:
+            shutil.copyfileobj(f, sys.stdout.buffer)
+        _success("wrote zip to stdout")
+    else:
+        _success(f"wrote {output}")
 
 
 def _convert_work(work, output, image, db_name, container, allow_restore_errors=False):
@@ -395,43 +407,69 @@ def convert(
 ):
     """Convert *zip_path* (Odoo zip backup or plain SQL dump).
 
-    The input is staged as ``dump.sql`` — the plain-SQL format Odoo zip
-    backups use — then restored into a throwaway container running
-    *image*'s PostgreSQL and re-dumped from that server. *filestore_dir*,
-    when given, is bundled into the output zip as ``filestore/``.
+    ``zip_path == "-"`` reads the dump from stdin; ``output == "-"``
+    writes the zip to stdout. The input is staged as ``dump.sql`` — the
+    plain-SQL format Odoo zip backups use — then restored into a
+    throwaway container running *image*'s PostgreSQL and re-dumped from
+    that server. *filestore_dir*, when given, is bundled into the output
+    zip as ``filestore/``.
     """
-    zip_path = Path(zip_path)
-    output = Path(output)
-    is_zip = zipfile.is_zipfile(zip_path)
-    if not is_zip:
-        with open(zip_path, "rb") as f:
-            is_custom = f.read(5) == b"PGDMP"
-    else:
-        is_custom = False
-    if is_custom:
-        raise click.ClickException(
-            f"{zip_path} is a custom-format pg_dump; dump-convert needs "
-            "plain SQL (pg_dump -Fp) or an Odoo zip backup"
-        )
+    stdin_mode = str(zip_path) == "-"
+    stdout_mode = str(output) == "-"
+    is_zip = is_custom = None
+    if not stdin_mode:
+        zip_path = Path(zip_path)
+        is_zip = zipfile.is_zipfile(zip_path)
+        if not is_zip:
+            with open(zip_path, "rb") as f:
+                is_custom = f.read(5) == b"PGDMP"
+        if is_custom:
+            raise click.ClickException(
+                f"{zip_path} is a custom-format pg_dump; dump-convert needs "
+                "plain SQL (pg_dump -Fp) or an Odoo zip backup"
+            )
+    src_desc = "stdin" if stdin_mode else str(zip_path)
+    dst_desc = "stdout" if stdout_mode else str(output)
     if dry_run:
         _info(
-            f"Would restore {zip_path} into a throwaway {image} container "
-            f"and write {output}"
+            f"Would restore {src_desc} into a throwaway {image} container "
+            f"and write {dst_desc}"
         )
         if filestore_dir:
             _info(f"Would include filestore from {filestore_dir}")
         return
     if shutil.which("docker") is None:
         raise click.ClickException("docker not found on PATH")
-    output.parent.mkdir(parents=True, exist_ok=True)
+    # Work next to a real output dir (or cwd for stdout): /tmp is often a
+    # small tmpfs and dumps are huge.
+    anchor = Path.cwd() if stdout_mode else Path(output).parent
+    if not stdout_mode:
+        anchor.mkdir(parents=True, exist_ok=True)
     container = f"pgdump-convert-{os.getpid()}"
-    # Work next to the output: /tmp is often a small tmpfs and dumps are huge.
-    with tempfile.TemporaryDirectory(dir=output.parent) as tmp:
+    with tempfile.TemporaryDirectory(dir=anchor) as tmp:
         work = Path(tmp)
-        if is_zip:
-            _extract(zip_path, work)
+        src = work / "input.dump"
+        if stdin_mode:
+            _info("reading dump from stdin")
+            with open(src, "wb") as f:
+                shutil.copyfileobj(sys.stdin.buffer, f)
+            is_zip = zipfile.is_zipfile(src)
+            if not is_zip:
+                with open(src, "rb") as f:
+                    is_custom = f.read(5) == b"PGDMP"
+            if is_custom:
+                raise click.ClickException(
+                    "stdin is a custom-format pg_dump; dump-convert needs "
+                    "plain SQL (pg_dump -Fp) or an Odoo zip backup"
+                )
         else:
-            _import_sql(zip_path, work)
+            src = zip_path
+        if src.stat().st_size == 0:
+            raise click.ClickException(f"{src_desc} is empty")
+        if is_zip:
+            _extract(src, work)
+        else:
+            _import_sql(src, work)
         if filestore_dir:
             stage_filestore(filestore_dir, work)
         _convert_work(work, output, image, db_name, container, allow_restore_errors)
@@ -518,10 +556,11 @@ def convert_db(
     The dump is produced by the local ``pg_dump`` (libpq env applies) and
     goes through the same throwaway-container conversion as file input.
     """
-    output = Path(output)
+    stdout_mode = str(output) == "-"
     if dry_run:
+        dst = "stdout" if stdout_mode else str(output)
         _info(
-            f"Would pg_dump '{src_db}' and write {output} via a throwaway "
+            f"Would pg_dump '{src_db}' and write {dst} via a throwaway "
             f"{image} container"
         )
         if filestore_dir:
@@ -535,9 +574,11 @@ def convert_db(
         raise click.ClickException("psql not found on PATH")
     if not _db_exists(src_db):
         raise click.ClickException(f"database '{src_db}' does not exist")
-    output.parent.mkdir(parents=True, exist_ok=True)
+    anchor = Path.cwd() if stdout_mode else Path(output).parent
+    if not stdout_mode:
+        anchor.mkdir(parents=True, exist_ok=True)
     container = f"pgdump-convert-{os.getpid()}"
-    with tempfile.TemporaryDirectory(dir=output.parent) as tmp:
+    with tempfile.TemporaryDirectory(dir=anchor) as tmp:
         work = Path(tmp)
         _info(f"dumping '{src_db}'")
         _dump_db(src_db, work / "dump.sql")

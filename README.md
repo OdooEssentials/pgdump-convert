@@ -8,6 +8,10 @@ pgdump-convert [INPUT] [OUTPUT] [--to 16] [--image IMAGE]
                [--dry-run] [--allow-restore-errors]
 ```
 
+`INPUT` defaults to **stdin** and `OUTPUT` to **stdout** — the tool is
+pipe-friendly (`-` selects either stream explicitly). All progress
+messages go to stderr, so stdout carries only the zip.
+
 The dump is restored into a throwaway `postgres:<version>` docker
 container and re-dumped from that server, so the output is guaranteed to
 be compatible with the target version — e.g. turning a PostgreSQL 18
@@ -15,15 +19,16 @@ dump into one a PostgreSQL 16 server (odoo.sh) can restore.
 
 ## Sources
 
-- **File** — an Odoo-format zip backup (`dump.sql` + `filestore/` +
-  `manifest.json`) or a plain `pg_dump -Fp` `.sql` file. Custom-format
-  (`pg_dump -Fc`) files are rejected.
+- **File/stdin** — an Odoo-format zip backup (`dump.sql` + `filestore/`
+  - `manifest.json`), a plain `pg_dump -Fp` `.sql` file, or either
+    piped on stdin. Custom-format (`pg_dump -Fc`) input is rejected.
 - **Database** — `--from-db NAME` dumps via the local `pg_dump`; libpq
   environment variables (`PGHOST`, `PGUSER`, `PGPASSWORD`, `~/.pgpass`,
   …) apply as usual. A manifest is synthesized with the installed
   module list from `ir_module_module`.
 
-With `--from-db` the first positional argument is the output path.
+With `--from-db` the first positional argument is the output path
+(default: stdout).
 
 ## Output
 

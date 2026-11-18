@@ -1,5 +1,6 @@
 """``pgdump-convert`` command line interface."""
 
+import sys
 from pathlib import Path
 
 import click
@@ -74,12 +75,13 @@ def main(
     compatible with the target version. Produces an Odoo-format zip
     backup (``dump.sql`` + ``filestore/`` + ``manifest.json``).
 
+    INPUT defaults to stdin and OUTPUT to stdout (``-`` for either).
     The source can be a backup zip, a plain ``pg_dump -Fp`` .sql file,
     or a database: pass ``--from-db NAME``.
 
     \b
-      pgdump-convert backup.zip
-      pgdump-convert dump.sql backup-pg16.zip --to 16
+      pgdump-convert backup.zip > backup-pg16.zip
+      cat dump.sql | pgdump-convert --to 16 > backup-pg16.zip
       pgdump-convert --from-db minha-vinha --filestore /path/to/filestore
     """
     image = image or f"postgres:{to}"
@@ -87,7 +89,7 @@ def main(
         # No input is read, so the first positional is the OUTPUT.
         if output is not None:
             raise click.UsageError("with --from-db only one output path is allowed")
-        out = Path(input) if input else Path.cwd() / f"{from_db}-pg{to}.zip"
+        out = input if input else "-"
         core.convert_db(
             from_db,
             out,
@@ -98,14 +100,16 @@ def main(
             allow_restore_errors=allow_restore_errors,
         )
         return
-    if input is None:
+    src = input if input is not None else "-"
+    if src != "-":
+        if not Path(src).is_file():
+            raise click.ClickException(f"{src} is not a file")
+    elif input is None and sys.stdin.isatty():
         raise click.ClickException(
-            "Nothing to convert: pass a backup file or --from-db NAME."
+            "Nothing to convert: pass a backup file, --from-db NAME, "
+            "or pipe a dump on stdin."
         )
-    src = Path(input)
-    if not src.is_file():
-        raise click.ClickException(f"{src} is not a file")
-    out = Path(output) if output else src.with_name(f"{src.stem}-pg{to}.zip")
+    out = output if output else "-"
     core.convert(
         src,
         out,
