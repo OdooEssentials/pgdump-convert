@@ -31,11 +31,13 @@ pgdump-convert [INPUT] [OUTPUT] [--to 16] [--image IMAGE]
 - Output is always an Odoo-format zip: plain-SQL `dump.sql`, optional
   `filestore/`, `manifest.json` with `pg_version` set to the target
   server version.
-- `_filter_dump` delegates to the Rust extension (`pgdump_convert._rs`,
-  `native/`): it drops `\restrict`/`\unrestrict` and
-  `SET transaction_timeout`, rewrites PG18 NOT NULL table constraints
-  to `ALTER TABLE ... SET NOT NULL`, and passes COPY payloads through
-  untouched. Rules live only in Rust — see `specs/rust-core.md`.
+- `_filter_dump` applies registered rules so version quirks are easy to
+  add: `LINE_RULES` (per-line drop/rewrite via `LineRule`) and
+  `BLOCK_RULES` (multi-line statement transforms via `BlockRule`
+  subclasses, e.g. `Pg18NotNull`). Rules rewrite/drop:
+  `\restrict`/`\unrestrict`, `SET transaction_timeout`, PG18 NOT NULL
+  table constraints → `ALTER TABLE ... SET NOT NULL`. COPY payloads
+  pass through untouched.
 - The docker container is always removed (`try/finally`); `--dry-run`
   needs no docker or pg tools.
 

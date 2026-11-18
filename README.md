@@ -42,16 +42,19 @@ that older servers reject:
 
 Requires docker. The container is always removed afterwards.
 
-The dump transform runs in a Rust extension (`pgdump_convert._rs`,
-built by maturin from `native/`) — it is required, not optional.
-
 ### Adding a transform rule
 
-Version-compatibility quirks live in `native/src/lib.rs` — the single
-source of truth, implemented as streaming line rules (drop/rewrite
-regexes) and a `CREATE TABLE` block rewriter for multi-line statements.
-COPY payloads are never touched. Add a rule there and cover it with a
-`cargo test` case.
+Version-compatibility quirks live in `pgdump_convert/core.py` as two
+registries, both applied while streaming the dump (COPY payloads are
+never touched):
+
+- **`LINE_RULES`** — per-line drop/rewrite. Append
+  `LineRule("name", PATTERN, replacement)`; `replacement=None` drops the
+  line, otherwise the match is expanded with `re.Match.expand`
+  (`\g<name>` groups work).
+- **`BLOCK_RULES`** — multi-line statement transforms. Subclass
+  `BlockRule` (`starts`/`feed`/`emit`) and register the class, e.g. the
+  `Pg18NotNull` rule that rewrites CREATE TABLE bodies.
 
 ## Install
 
@@ -61,22 +64,13 @@ pip install pgdump-convert   # or: pipx install pgdump-convert
 
 ## Development
 
-A Rust toolchain is required to build from source (prebuilt wheels will
-not need one):
-
 ```
-pip install maturin
-pip install -e '.[test]'
-python -m pytest
-cargo test --manifest-path native/Cargo.toml
+python -m venv .venv && .venv/bin/pip install -e '.[test]'
+.venv/bin/python -m pytest
 ```
-
-The Rust core lives in `native/` and is built by maturin as
-`pgdump_convert._rs`; it is the only implementation of the dump
-transform rules. CI runs `cargo test` plus the Python suite on
-Python 3.10–3.14.
 
 ## Roadmap
 
-- Benchmark the native transform against realistic multi-GB dumps and
-  record numbers in this README. See `specs/rust-core.md`.
+- Reimplement the dump-filtering internals in Rust and expose them to
+  the Python CLI through bindings (e.g. PyO3), keeping the Python
+  script as the interface. See `specs/rust-core.md`.
