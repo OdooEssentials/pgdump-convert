@@ -14,17 +14,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: pip install -e '.[test]'
       - run: python -m pytest -q
-  pytest-pure-python:
-    # Same suite with the Rust extension unavailable, exercising the
-    # pure-Python fallback path in core._filter_dump.
+  rust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install 'pytest>=7' 'click>=8.0'
-      - run: PYTHONPATH=. python -m pytest -q
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --manifest-path native/Cargo.toml
   pre-commit:
     runs-on: ubuntu-latest
     steps:

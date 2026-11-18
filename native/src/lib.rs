@@ -144,3 +144,68 @@ fn _rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(filter_dump, m)?)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn run_filter(input: &[u8]) -> (Vec<u8>, u64) {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "pgdump-convert-test-{}-{}",
+            std::process::id(),
+            id
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("in.sql");
+        let dst = dir.join("out.sql");
+        let mut f = File::create(&src).unwrap();
+        f.write_all(input).unwrap();
+        drop(f);
+        let dropped = filter_dump_inner(&src, &dst).unwrap();
+        let out = std::fs::read(&dst).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        (out, dropped)
+    }
+
+    #[test]
+    fn drops_restrict_and_timeout() {
+        let (out, dropped) = run_filter(
+            b"\\restrict ABC123\nSET transaction_timeout = 0;\nSELECT 1;\n\\unrestrict ABC123\n",
+        );
+        assert_eq!(out, b"SELECT 1;\n");
+        assert_eq!(dropped, 0);
+    }
+
+    #[test]
+    fn rewrites_pg18_not_null() {
+        let (out, dropped) = run_filter(
+            b"CREATE TABLE public.t (\n    id integer NOT NULL,\n    CONSTRAINT t_name_nn NOT NULL name,\n    val text\n)\nINHERITS (public.base);\n",
+        );
+        assert_eq!(dropped, 1);
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains("CONSTRAINT t_name_nn"));
+        assert!(text.contains("id integer NOT NULL"));
+        assert!(text.contains(
+            "ALTER TABLE ONLY public.t ALTER COLUMN name SET NOT NULL;"
+        ));
+    }
+
+    #[test]
+    fn copy_payload_untouched() {
+        let (out, _) = run_filter(
+            b"COPY public.t (id) FROM stdin;\n1\nNOT NULL fake\n\\.\nSELECT 1;\n",
+        );
+        assert!(out.windows(8).any(|w| w == b"NOT NULL"));
+        assert!(out.ends_with(b"SELECT 1;\n"));
+    }
+
+    #[test]
+    fn single_line_create_table() {
+        let (out, dropped) = run_filter(b"CREATE TABLE public.u (id int);\n");
+        assert_eq!(dropped, 0);
+        assert_eq!(out, b"CREATE TABLE public.u (id int);\n");
+    }
+}

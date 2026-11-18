@@ -43,26 +43,15 @@ that older servers reject:
 Requires docker. The container is always removed afterwards.
 
 The dump transform runs in a Rust extension (`pgdump_convert._rs`,
-PyO3/maturin) when built; otherwise the identical pure-Python pipeline
-is used, so the CLI works from a plain `pip install` too.
+built by maturin from `native/`) — it is required, not optional.
 
 ### Adding a transform rule
 
-Version-compatibility quirks live in `pgdump_convert/core.py` as two
-registries, both applied while streaming the dump (COPY payloads are
-never touched):
-
-- **`LINE_RULES`** — per-line drop/rewrite. Append
-  `LineRule("name", PATTERN, replacement)`; `replacement=None` drops the
-  line, otherwise the match is expanded with `re.Match.expand`
-  (`\g<name>` groups work).
-- **`BLOCK_RULES`** — multi-line statement transforms. Subclass
-  `BlockRule` (`starts`/`feed`/`emit`) and register the class, e.g. the
-  `Pg18NotNull` rule that rewrites CREATE TABLE bodies.
-
-Note: the Rust extension (`native/`) mirrors the built-in rules for
-speed. When you add a rule here, port it to `native/src/lib.rs` too —
-or wait for the bindings work in `specs/rust-core.md`.
+Version-compatibility quirks live in `native/src/lib.rs` — the single
+source of truth, implemented as streaming line rules (drop/rewrite
+regexes) and a `CREATE TABLE` block rewriter for multi-line statements.
+COPY payloads are never touched. Add a rule there and cover it with a
+`cargo test` case.
 
 ## Install
 
@@ -72,20 +61,22 @@ pip install pgdump-convert   # or: pipx install pgdump-convert
 
 ## Development
 
+A Rust toolchain is required to build from source (prebuilt wheels will
+not need one):
+
 ```
-# Rust toolchain required for the native extension (optional: the
-# pure-Python fallback is used when it is absent)
 pip install maturin
 pip install -e '.[test]'
 python -m pytest
+cargo test --manifest-path native/Cargo.toml
 ```
 
 The Rust core lives in `native/` and is built by maturin as
-`pgdump_convert._rs`. CI builds it on every Python version and also
-runs the suite once without it to cover the fallback.
+`pgdump_convert._rs`; it is the only implementation of the dump
+transform rules. CI runs `cargo test` plus the Python suite on
+Python 3.10–3.14.
 
 ## Roadmap
 
-- Expose the rule registries (`LINE_RULES`/`BLOCK_RULES`) through the
-  Rust bindings so new transforms can be added in one place. See
-  `specs/rust-core.md`.
+- Benchmark the native transform against realistic multi-GB dumps and
+  record numbers in this README. See `specs/rust-core.md`.
