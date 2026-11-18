@@ -49,8 +49,17 @@ from . import core
     is_flag=True,
     help="Report what would run without doing it.",
 )
+@click.option(
+    "--allow-restore-errors",
+    is_flag=True,
+    help="Continue even if the in-container restore reports SQL errors "
+    "(default: fail fast, since the dump may be incomplete).",
+)
 @click.version_option()
-def main(input, output, to, image, db_name, from_db, filestore_dir, dry_run):
+def main(
+    input, output, to, image, db_name, from_db, filestore_dir, dry_run,
+    allow_restore_errors,
+):
     """Convert a PostgreSQL dump to a different server major version.
 
     Restores the dump into a throwaway ``postgres:<version>`` docker
@@ -79,6 +88,7 @@ def main(input, output, to, image, db_name, from_db, filestore_dir, dry_run):
             db_name=db_name,
             filestore_dir=filestore_dir,
             dry_run=dry_run,
+            allow_restore_errors=allow_restore_errors,
         )
         return
     if input is None:
@@ -96,6 +106,7 @@ def main(input, output, to, image, db_name, from_db, filestore_dir, dry_run):
         db_name=db_name,
         filestore_dir=filestore_dir,
         dry_run=dry_run,
+        allow_restore_errors=allow_restore_errors,
     )
 
 

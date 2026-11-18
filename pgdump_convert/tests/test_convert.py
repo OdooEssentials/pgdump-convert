@@ -149,6 +149,51 @@ def test_filestore_dir_bundled(tmp_path, monkeypatch):
         assert zf.read("filestore/ab/cd") == b"attachment-bytes"
 
 
+def _fake_docker_restore_errors(args, **kwargs):
+    """Fake docker whose psql restore log contains SQL ERROR lines."""
+    if kwargs.get("stdout") is not None and hasattr(kwargs["stdout"], "write"):
+        if "pg_dump" in args:
+            kwargs["stdout"].write(b"-- pg_dump 16 output\nCREATE TABLE t(id int);\n")
+        elif "psql" in args and "-f" in args:
+            kwargs["stdout"].write(
+                b"ERROR:  relation \"missing_table\" does not exist\n"
+            )
+        return _cp(args)
+    return _fake_docker(args, **kwargs)
+
+
+def test_restore_errors_fail_fast(tmp_path, monkeypatch):
+    """SQL errors during the in-container restore abort the conversion —
+    a partially-restored dump must not be re-dumped silently."""
+    src = tmp_path / "backup.zip"
+    out = tmp_path / "backup-pg16.zip"
+    _make_backup(src)
+    monkeypatch.setattr(core, "_run", _fake_docker_restore_errors)
+    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/" + name)
+
+    result = CliRunner().invoke(main, [str(src), str(out), "--to", "16"])
+
+    assert result.exit_code != 0
+    assert "ERROR" in result.output
+    assert not out.exists()
+
+
+def test_allow_restore_errors_continues(tmp_path, monkeypatch):
+    """--allow-restore-errors keeps going despite restore ERROR lines."""
+    src = tmp_path / "backup.zip"
+    out = tmp_path / "backup-pg16.zip"
+    _make_backup(src)
+    monkeypatch.setattr(core, "_run", _fake_docker_restore_errors)
+    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/" + name)
+
+    result = CliRunner().invoke(
+        main, [str(src), str(out), "--to", "16", "--allow-restore-errors"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+
+
 def test_dry_run_needs_no_docker(tmp_path, monkeypatch):
     """--dry-run reports the plan without requiring docker."""
     src = tmp_path / "backup.zip"

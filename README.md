@@ -5,7 +5,7 @@ Convert a PostgreSQL dump to a different server major version.
 ```
 pgdump-convert [INPUT] [OUTPUT] [--to 16] [--image IMAGE]
                [--container-db NAME] [--from-db NAME] [--filestore DIR]
-               [--dry-run]
+               [--dry-run] [--allow-restore-errors]
 ```
 
 The dump is restored into a throwaway `postgres:<version>` docker
@@ -40,7 +40,10 @@ that older servers reject:
 - PG18 table-level `[CONSTRAINT name] NOT NULL col` elements, rewritten
   as `ALTER TABLE ... ALTER COLUMN ... SET NOT NULL`.
 
-Requires docker. The container is always removed afterwards.
+Requires docker. The container is always removed afterwards. If the
+in-container restore reports SQL `ERROR` lines the conversion fails
+fast — the dump may be incomplete; pass `--allow-restore-errors` to
+re-dump anyway.
 
 ### Adding a transform rule
 

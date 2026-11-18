@@ -40,6 +40,9 @@ pgdump-convert [INPUT] [OUTPUT] [--to 16] [--image IMAGE]
   pass through untouched.
 - The docker container is always removed (`try/finally`); `--dry-run`
   needs no docker or pg tools.
+- Restore `ERROR:` lines in the psql log fail the conversion fast
+  (partial restores must not be re-dumped silently);
+  `--allow-restore-errors` opts out.
 
 ## Alternatives considered
 

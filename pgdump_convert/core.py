@@ -252,7 +252,7 @@ def _wait_ready(container):
     raise click.ClickException(f"container {container} did not become ready")
 
 
-def _restore(container, db_name, dump_file, log_path):
+def _restore(container, db_name, dump_file, log_path, allow_errors=False):
     _run(["cp", str(dump_file), f"{container}:/tmp/dump.sql"])
     with open(log_path, "wb") as log:
         _docker_exec(
@@ -270,6 +270,12 @@ def _restore(container, db_name, dump_file, log_path):
     _info(f"psql reported {len(errors)} ERROR line(s)")
     for line in errors[-5:]:
         _warning(f"  {line}")
+    if errors and not allow_errors:
+        raise click.ClickException(
+            f"restore reported {len(errors)} ERROR line(s); the dump may "
+            "be incomplete. Re-run with --allow-restore-errors to continue "
+            "anyway."
+        )
 
 
 def _redump(container, db_name, raw_path, out_path):
@@ -324,7 +330,9 @@ def _write_zip(work, output, pg_version):
     _success(f"wrote {output}")
 
 
-def _convert_work(work, output, image, db_name, container):
+def _convert_work(
+    work, output, image, db_name, container, allow_restore_errors=False
+):
     """Run the throwaway-container conversion on ``work/dump.sql``.
 
     ``work`` may also hold ``manifest.json`` and ``filestore/``; they are
@@ -354,7 +362,9 @@ def _convert_work(work, output, image, db_name, container):
         _wait_ready(container)
         _docker_exec(container, ["createdb", "-U", "postgres", db_name])
         _info("restoring dump")
-        _restore(container, db_name, dump_in, work / "psql.log")
+        _restore(
+            container, db_name, dump_in, work / "psql.log", allow_restore_errors
+        )
         _info(f"re-dumping with pg_dump from {image}")
         server_version = _redump(
             container, db_name, work / "dump-raw.sql", work / "dump-new.sql"
@@ -372,6 +382,7 @@ def convert(
     db_name="odoo",
     filestore_dir=None,
     dry_run=False,
+    allow_restore_errors=False,
 ):
     """Convert *zip_path* (Odoo zip backup or plain SQL dump).
 
@@ -414,7 +425,9 @@ def convert(
             _import_sql(zip_path, work)
         if filestore_dir:
             stage_filestore(filestore_dir, work)
-        _convert_work(work, output, image, db_name, container)
+        _convert_work(
+            work, output, image, db_name, container, allow_restore_errors
+        )
 
 
 def _pg_tool(tool, args):
@@ -491,6 +504,7 @@ def convert_db(
     db_name="odoo",
     filestore_dir=None,
     dry_run=False,
+    allow_restore_errors=False,
 ):
     """Export database *src_db* and convert it.
 
@@ -523,7 +537,9 @@ def convert_db(
         if filestore_dir:
             stage_filestore(filestore_dir, work)
         _write_source_manifest(src_db, work)
-        _convert_work(work, output, image, db_name, container)
+        _convert_work(
+            work, output, image, db_name, container, allow_restore_errors
+        )
 
 
 def stage_filestore(filestore_dir, work):
