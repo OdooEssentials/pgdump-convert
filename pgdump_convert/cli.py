@@ -38,14 +38,6 @@ from . import core
     "instead of reading INPUT.",
 )
 @click.option(
-    "--filestore",
-    "filestore_dir",
-    default=None,
-    metavar="DIR",
-    type=click.Path(file_okay=False),
-    help="Directory to bundle into the zip as filestore/.",
-)
-@click.option(
     "--docker-test",
     "docker_test",
     is_flag=True,
@@ -79,7 +71,6 @@ def main(
     image,
     db_name,
     from_db,
-    filestore_dir,
     docker_test,
     docker_import,
     dry_run,
@@ -87,22 +78,19 @@ def main(
 ):
     """Convert a PostgreSQL dump to a different server major version.
 
-    Rewrites the dump's SQL for the target version and produces an
-    Odoo-format zip backup (``dump.sql`` + ``filestore/`` +
-    ``manifest.json``). ``--docker-test``/``--docker-import``
-    additionally load the result into a ``postgres:<version>``
-    container — the former removes it after checking, the latter
-    leaves it running for inspection.
-
-    INPUT defaults to stdin and OUTPUT to stdout (``-`` for either).
-    The source can be a backup zip, a plain ``pg_dump -Fp`` .sql file,
-    or a database: pass ``--from-db NAME``.
+    Rewrites a plain SQL dump (``pg_dump -Fp``) for another PostgreSQL
+    version. INPUT defaults to stdin and OUTPUT to stdout (``-`` for
+    either). ``--docker-test``/``--docker-import`` additionally load the
+    result into a ``postgres:<version>`` container — the former removes
+    it after checking, the latter leaves it running for inspection.
+    ``--from-db NAME`` dumps a database via the local ``pg_dump``
+    instead of reading INPUT.
 
     \b
-      pgdump-convert backup.zip > backup-pg16.zip
-      cat dump.sql | pgdump-convert --to 16 > backup-pg16.zip
-      pgdump-convert --docker-test --to 16 backup.zip > backup-pg16.zip
-      pgdump-convert --from-db minha-vinha --filestore /path/to/filestore
+      pgdump-convert dump.sql > dump-pg16.sql
+      cat dump.sql | pgdump-convert --to 16 | psql -d target
+      pgdump-convert --docker-test --to 16 dump.sql > dump-pg16.sql
+      pgdump-convert --from-db minha-vinha > dump-pg16.sql
     """
     image = image or f"postgres:{to}"
     if docker_test and docker_import:
@@ -120,9 +108,7 @@ def main(
             out,
             image=image,
             db_name=db_name,
-            filestore_dir=filestore_dir,
             docker=docker,
-            target_version=to,
             dry_run=dry_run,
             allow_restore_errors=allow_restore_errors,
         )
@@ -142,9 +128,7 @@ def main(
         out,
         image=image,
         db_name=db_name,
-        filestore_dir=filestore_dir,
         docker=docker,
-        target_version=to,
         dry_run=dry_run,
         allow_restore_errors=allow_restore_errors,
     )

@@ -1,7 +1,5 @@
-"""Tests for the ``pgdump-convert`` CLI and conversion pipeline."""
+"""Tests for the ``pgdump-convert`` CLI and SQL transform pipeline."""
 
-import io
-import json
 import subprocess
 import zipfile
 from pathlib import Path
@@ -19,149 +17,101 @@ def _cp(args, rc=0, stdout=b"", stderr=b""):
 def _fake_docker(args, **kwargs):
     """Stand-in for ``docker``: accepts everything, returns canned output."""
     if kwargs.get("stdout") is not None and hasattr(kwargs["stdout"], "write"):
-        # Streaming call (psql restore log or pg_dump output).
-        if "pg_dump" in args:
-            kwargs["stdout"].write(
-                b"-- fake pg_dump 16 output\n"
-                b"\\restrict FAKEKEY123\n"
-                b"CREATE TABLE t(id int);\n"
-                b"\\unrestrict FAKEKEY123\n"
-            )
+        # Streaming call (psql restore log).
         return _cp(args)
     if "pg_isready" in args:
         return _cp(args)
-    if any("SHOW" in a for a in args):
-        return _cp(args, stdout=b"16.14 (Debian 16.14-1.pgdg13+1)\n")
     return _cp(args)
 
 
-def _make_backup(path):
-    """Write a minimal Odoo-format zip backup at *path*."""
-    with zipfile.ZipFile(path, "w") as zf:
-        zf.writestr(
-            "dump.sql",
-            "-- dump header\n"
-            "\\restrict ABC123\n"
-            "CREATE TABLE res_partner(id int);\n"
-            "\\unrestrict ABC123\n"
-            "-- PostgreSQL database dump complete\n",
+def _make_sql(path, body=None):
+    """Write a minimal plain-SQL dump at *path*."""
+    Path(path).write_bytes(
+        body
+        or (
+            b"-- dump header\n"
+            b"\\restrict ABC123\n"
+            b"CREATE TABLE res_partner(id int);\n"
+            b"\\unrestrict ABC123\n"
+            b"-- PostgreSQL database dump complete\n"
         )
-        zf.writestr(
-            "manifest.json",
-            json.dumps(
-                {
-                    "odoo_dump": "1",
-                    "db_name": "vinha",
-                    "pg_version": "18.6",
-                    "version": "19.0",
-                }
-            ),
-        )
-        zf.writestr("filestore/ab/cd", "attachment-bytes")
+    )
 
 
-def _fake_docker_and_path(monkeypatch):
+def _fake_backend(monkeypatch):
     monkeypatch.setattr(core, "_run", _fake_docker)
     monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/" + name)
 
 
-def test_zip_backup_repackages(tmp_path, monkeypatch):
-    """A PG18 Odoo backup zip converts for a PG16 target.
-
-    The output zip keeps the filestore and manifest, its dump.sql is the
-    re-dumped output without \\restrict lines, and the manifest's
-    pg_version reflects the target server.
-    """
-    src = tmp_path / "backup.zip"
-    out = tmp_path / "backup-pg16.zip"
-    _make_backup(src)
-    _fake_docker_and_path(monkeypatch)
-
-    result = CliRunner().invoke(
-        main, [str(src), str(out), "--to", "16", "--docker-test"]
-    )
-
-    assert result.exit_code == 0, result.output
-    with zipfile.ZipFile(out) as zf:
-        names = zf.namelist()
-        assert "dump.sql" in names
-        assert "manifest.json" in names
-        assert "filestore/ab/cd" in names
-        assert zf.read("filestore/ab/cd") == b"attachment-bytes"
-        manifest = json.loads(zf.read("manifest.json"))
-        assert manifest["pg_version"] == "16.14"
-        assert manifest["version"] == "19.0"
-        dump = zf.read("dump.sql")
-    # --verify checks the dump loads but the zip keeps the filtered input
-    assert b"CREATE TABLE res_partner" in dump
-    assert b"\\restrict" not in dump
-    assert b"\\unrestrict" not in dump
+# --- file and stream conversion ---------------------------------------------
 
 
-def test_plain_sql_file_accepted(tmp_path, monkeypatch):
-    """A plain pg_dump -Fp .sql file converts like a zip's dump.sql.
+def test_sql_file_to_file(tmp_path, monkeypatch):
+    """A plain SQL dump is filtered for the target version.
 
-    The output zip carries the re-dumped SQL and no manifest/filestore,
-    since a bare SQL file has neither.
+    \\restrict meta-commands are stripped; no docker is needed.
     """
     src = tmp_path / "dump.sql"
-    src.write_text(
-        "-- plain pg_dump\n"
-        "\\restrict KEY1\n"
-        "CREATE TABLE res_users(id int);\n"
-        "\\unrestrict KEY1\n"
-    )
-    out = tmp_path / "dump-pg16.zip"
-    _fake_docker_and_path(monkeypatch)
-
-    result = CliRunner().invoke(
-        main, [str(src), str(out), "--to", "16", "--docker-test"]
-    )
-
-    assert result.exit_code == 0, result.output
-    with zipfile.ZipFile(out) as zf:
-        assert "dump.sql" in zf.namelist()
-        assert "manifest.json" not in zf.namelist()
-        dump = zf.read("dump.sql")
-    assert b"CREATE TABLE res_users" in dump
-    assert b"\\restrict" not in dump
-
-
-def test_default_needs_no_docker(tmp_path, monkeypatch):
-    """The default conversion needs no docker or a server.
-
-    The manifest's pg_version is stamped with the --to target since no
-    server verified it.
-    """
-    src = tmp_path / "backup.zip"
-    out = tmp_path / "backup-pg16.zip"
-    _make_backup(src)
+    out = tmp_path / "dump-pg16.sql"
+    _make_sql(src)
     monkeypatch.setattr(core.shutil, "which", lambda name: None)
 
     result = CliRunner().invoke(main, [str(src), str(out), "--to", "16"])
 
     assert result.exit_code == 0, result.output
-    with zipfile.ZipFile(out) as zf:
-        manifest = json.loads(zf.read("manifest.json"))
-        assert manifest["pg_version"] == "16"
-        dump = zf.read("dump.sql")
+    dump = out.read_bytes()
+    assert b"CREATE TABLE res_partner" in dump
+    assert b"\\restrict" not in dump
+    assert b"\\unrestrict" not in dump
+
+
+def test_stdin_to_stdout_roundtrip(tmp_path, monkeypatch):
+    """With no positional args the SQL is read from stdin and written
+    to stdout."""
+    src = tmp_path / "dump.sql"
+    _make_sql(src)
+    monkeypatch.setattr(core.shutil, "which", lambda name: None)
+
+    result = CliRunner().invoke(main, ["--to", "16"], input=src.read_bytes())
+
+    assert result.exit_code == 0, result.output
+    dump = result.stdout_bytes
     assert b"CREATE TABLE res_partner" in dump
     assert b"\\restrict" not in dump
 
 
-def test_from_db_default_needs_no_docker(tmp_path, monkeypatch):
-    """--from-db converts without docker by default."""
-    _fake_db_backend(monkeypatch)
-    out = tmp_path / "export.zip"
+def test_explicit_dash_stdin_stdout(tmp_path, monkeypatch):
+    """'-' selects stdin/stdout explicitly, same as omitting them."""
+    src = tmp_path / "dump.sql"
+    _make_sql(src)
+    monkeypatch.setattr(core.shutil, "which", lambda name: None)
 
-    result = CliRunner().invoke(main, ["--from-db", "vinha", str(out), "--to", "16"])
+    result = CliRunner().invoke(main, ["-", "-", "--to", "16"], input=src.read_bytes())
 
     assert result.exit_code == 0, result.output
-    with zipfile.ZipFile(out) as zf:
-        manifest = json.loads(zf.read("manifest.json"))
-        assert manifest["pg_version"] == "16"
-        assert manifest["modules"] == {"base": "19.0.1.0"}
-        assert b"CREATE TABLE ir_module_module" in zf.read("dump.sql")
+    assert b"CREATE TABLE res_partner" in result.stdout_bytes
+
+
+def test_empty_stdin_errors(tmp_path, monkeypatch):
+    """An empty stdin stream fails instead of producing empty output."""
+    monkeypatch.setattr(core.shutil, "which", lambda name: None)
+
+    result = CliRunner().invoke(main, ["--to", "16"], input=b"")
+
+    assert result.exit_code != 0
+    assert "empty" in result.output
+
+
+def test_zip_input_rejected(tmp_path):
+    """Zip archives are not SQL — rejected with a clear error."""
+    src = tmp_path / "backup.zip"
+    with zipfile.ZipFile(src, "w") as zf:
+        zf.writestr("dump.sql", "CREATE TABLE t(id int);\n")
+
+    result = CliRunner().invoke(main, [str(src), "--to", "16"])
+
+    assert result.exit_code != 0
+    assert "zip" in result.output.lower() or "sql" in result.output.lower()
 
 
 def test_custom_format_dump_rejected(tmp_path):
@@ -169,136 +119,67 @@ def test_custom_format_dump_rejected(tmp_path):
     src = tmp_path / "dump.pgdump"
     src.write_bytes(b"PGDMP" + b"\x00" * 100)
 
-    result = CliRunner().invoke(main, [str(src), "--dry-run"])
+    result = CliRunner().invoke(main, [str(src)])
 
     assert result.exit_code != 0
     assert "custom" in result.output.lower() or "plain" in result.output.lower()
 
 
-def test_filestore_dir_bundled(tmp_path, monkeypatch):
-    """--filestore DIR adds the directory to the output zip as filestore/."""
+def test_dry_run_needs_no_tools(tmp_path, monkeypatch):
+    """--dry-run reports the plan without docker or pg tools."""
     src = tmp_path / "dump.sql"
-    src.write_text("CREATE TABLE t(id int);\n")
-    fs = tmp_path / "fs"
-    (fs / "ab").mkdir(parents=True)
-    (fs / "ab" / "cd").write_bytes(b"attachment-bytes")
-    out = tmp_path / "out.zip"
-    _fake_docker_and_path(monkeypatch)
+    _make_sql(src)
+    monkeypatch.setattr(core.shutil, "which", lambda name: None)
 
-    result = CliRunner().invoke(
-        main,
-        [str(src), str(out), "--filestore", str(fs), "--docker-test"],
-    )
+    result = CliRunner().invoke(main, [str(src), "--to", "16", "--dry-run"])
 
     assert result.exit_code == 0, result.output
-    with zipfile.ZipFile(out) as zf:
-        assert zf.read("filestore/ab/cd") == b"attachment-bytes"
+    assert "filter" in result.output
+
+
+# --- docker helpers ----------------------------------------------------------
 
 
 def _fake_docker_restore_errors(args, **kwargs):
     """Fake docker whose psql restore log contains SQL ERROR lines."""
     if kwargs.get("stdout") is not None and hasattr(kwargs["stdout"], "write"):
-        if "pg_dump" in args:
-            kwargs["stdout"].write(b"-- pg_dump 16 output\nCREATE TABLE t(id int);\n")
-        elif "psql" in args and "-f" in args:
+        if "psql" in args and "-f" in args:
             kwargs["stdout"].write(b'ERROR:  relation "missing_table" does not exist\n')
         return _cp(args)
     return _fake_docker(args, **kwargs)
 
 
-def test_restore_errors_fail_fast(tmp_path, monkeypatch):
-    """SQL errors during the in-container restore abort the conversion —
-    a partially-restored dump must not be re-dumped silently."""
-    src = tmp_path / "backup.zip"
-    out = tmp_path / "backup-pg16.zip"
-    _make_backup(src)
-    monkeypatch.setattr(core, "_run", _fake_docker_restore_errors)
+def test_docker_test_restores_and_cleans_up(tmp_path, monkeypatch):
+    """--docker-test loads the filtered SQL into postgres:<to>, checks
+    it restores, and removes the container."""
+    src = tmp_path / "dump.sql"
+    out = tmp_path / "dump-pg16.sql"
+    _make_sql(src)
+    calls = []
+
+    def recording_fake(args, **kwargs):
+        calls.append(args)
+        return _fake_docker(args, **kwargs)
+
+    monkeypatch.setattr(core, "_run", recording_fake)
     monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/" + name)
 
     result = CliRunner().invoke(
         main, [str(src), str(out), "--to", "16", "--docker-test"]
     )
 
-    assert result.exit_code != 0
-    assert "ERROR" in result.output
-    assert not out.exists()
-
-
-def test_allow_restore_errors_continues(tmp_path, monkeypatch):
-    """--allow-restore-errors keeps going despite restore ERROR lines."""
-    src = tmp_path / "backup.zip"
-    out = tmp_path / "backup-pg16.zip"
-    _make_backup(src)
-    monkeypatch.setattr(core, "_run", _fake_docker_restore_errors)
-    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/" + name)
-
-    result = CliRunner().invoke(
-        main,
-        [
-            str(src),
-            str(out),
-            "--to",
-            "16",
-            "--docker-test",
-            "--allow-restore-errors",
-        ],
-    )
-
     assert result.exit_code == 0, result.output
     assert out.exists()
-
-
-def _fake_docker_fatal_restore(args, **kwargs):
-    """Fake docker whose psql restore dies with a nonzero exit code.
-
-    Fatal psql errors print lowercase ``psql: error:`` — they never
-    produce ``ERROR:`` lines, so only the exit code can catch them.
-    """
-    if kwargs.get("stdout") is not None and hasattr(kwargs["stdout"], "write"):
-        if "pg_dump" in args:
-            kwargs["stdout"].write(b"-- pg_dump 16 output\n")
-        elif "psql" in args and "-f" in args:
-            kwargs["stdout"].write(
-                b"psql: error: connection to server on socket failed\n"
-            )
-            return _cp(args, rc=2)
-        return _cp(args)
-    return _fake_docker(args, **kwargs)
-
-
-def test_fatal_restore_error_fails_even_with_flag(tmp_path, monkeypatch):
-    """A nonzero psql exit (dead container, lost connection) aborts the
-    conversion — --allow-restore-errors only covers per-statement
-    ERROR lines, not a failed restore."""
-    src = tmp_path / "backup.zip"
-    out = tmp_path / "backup-pg16.zip"
-    _make_backup(src)
-    monkeypatch.setattr(core, "_run", _fake_docker_fatal_restore)
-    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/" + name)
-
-    result = CliRunner().invoke(
-        main,
-        [
-            str(src),
-            str(out),
-            "--to",
-            "16",
-            "--docker-test",
-            "--allow-restore-errors",
-        ],
-    )
-
-    assert result.exit_code != 0
-    assert "exit code" in result.output
-    assert not out.exists()
+    assert any(c[:1] == ["run"] for c in calls)
+    assert any(c[:2] == ["rm", "-f"] for c in calls)
 
 
 def test_docker_import_keeps_container(tmp_path, monkeypatch):
     """--docker-import restores the dump and leaves the container
-    running for inspection; the zip still gets the filtered dump."""
-    src = tmp_path / "backup.zip"
-    out = tmp_path / "backup-pg16.zip"
-    _make_backup(src)
+    running for inspection."""
+    src = tmp_path / "dump.sql"
+    out = tmp_path / "dump-pg16.sql"
+    _make_sql(src)
     calls = []
 
     def recording_fake(args, **kwargs):
@@ -320,130 +201,125 @@ def test_docker_import_keeps_container(tmp_path, monkeypatch):
 
 def test_docker_test_and_import_are_exclusive(tmp_path):
     """--docker-test and --docker-import cannot be combined."""
-    src = tmp_path / "backup.zip"
-    _make_backup(src)
+    src = tmp_path / "dump.sql"
+    _make_sql(src)
 
     result = CliRunner().invoke(
         main,
-        [str(src), str(tmp_path / "o.zip"), "--docker-test", "--docker-import"],
+        [str(src), str(tmp_path / "o.sql"), "--docker-test", "--docker-import"],
     )
 
     assert result.exit_code != 0
 
 
-def test_dry_run_needs_no_docker(tmp_path, monkeypatch):
-    """--dry-run reports the plan without requiring docker."""
-    src = tmp_path / "backup.zip"
-    _make_backup(src)
-    monkeypatch.setattr(core.shutil, "which", lambda name: None)
-
-    result = CliRunner().invoke(main, [str(src), "--to", "16", "--dry-run"])
-
-    assert result.exit_code == 0, result.output
-    assert "filter" in result.output
-
-
-def test_stdin_to_stdout_roundtrip(tmp_path, monkeypatch):
-    """With no positional args the dump is read from stdin and the zip
-    written to stdout — both binary-safe."""
-    src = tmp_path / "backup.zip"
-    _make_backup(src)
-    _fake_docker_and_path(monkeypatch)
-
-    result = CliRunner().invoke(main, ["--to", "16"], input=src.read_bytes())
-
-    assert result.exit_code == 0, result.output
-    with zipfile.ZipFile(io.BytesIO(result.stdout_bytes)) as zf:
-        assert "dump.sql" in zf.namelist()
-        dump = zf.read("dump.sql")
-    assert b"CREATE TABLE res_partner" in dump
-    assert b"\\restrict" not in dump
-
-
-def test_explicit_stdin_stdout(tmp_path, monkeypatch):
-    """'-' selects stdin/stdout explicitly, same as omitting them."""
+def test_restore_errors_fail_fast(tmp_path, monkeypatch):
+    """SQL errors during the container restore abort before output."""
     src = tmp_path / "dump.sql"
-    src.write_text("CREATE TABLE t(id int);\n")
-    _fake_docker_and_path(monkeypatch)
+    out = tmp_path / "dump-pg16.sql"
+    _make_sql(src)
+    monkeypatch.setattr(core, "_run", _fake_docker_restore_errors)
+    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/" + name)
 
-    result = CliRunner().invoke(main, ["-", "-", "--to", "16"], input=src.read_bytes())
+    result = CliRunner().invoke(
+        main, [str(src), str(out), "--to", "16", "--docker-test"]
+    )
+
+    assert result.exit_code != 0
+    assert "ERROR" in result.output
+    assert not out.exists()
+
+
+def test_allow_restore_errors_continues(tmp_path, monkeypatch):
+    """--allow-restore-errors keeps going despite restore ERROR lines."""
+    src = tmp_path / "dump.sql"
+    out = tmp_path / "dump-pg16.sql"
+    _make_sql(src)
+    monkeypatch.setattr(core, "_run", _fake_docker_restore_errors)
+    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/" + name)
+
+    result = CliRunner().invoke(
+        main,
+        [str(src), str(out), "--to", "16", "--docker-test", "--allow-restore-errors"],
+    )
 
     assert result.exit_code == 0, result.output
-    assert result.stdout_bytes.startswith(b"PK")
+    assert out.exists()
 
 
-def test_empty_stdin_errors(tmp_path, monkeypatch):
-    """An empty stdin stream fails instead of producing an empty dump."""
-    _fake_docker_and_path(monkeypatch)
+def _fake_docker_fatal_restore(args, **kwargs):
+    """Fake docker whose psql restore dies with a nonzero exit code.
 
-    result = CliRunner().invoke(main, ["--to", "16"], input=b"")
+    Fatal psql errors print lowercase ``psql: error:`` — they never
+    produce ``ERROR:`` lines, so only the exit code can catch them.
+    """
+    if kwargs.get("stdout") is not None and hasattr(kwargs["stdout"], "write"):
+        if "psql" in args and "-f" in args:
+            kwargs["stdout"].write(
+                b"psql: error: connection to server on socket failed\n"
+            )
+            return _cp(args, rc=2)
+        return _cp(args)
+    return _fake_docker(args, **kwargs)
+
+
+def test_fatal_restore_error_fails_even_with_flag(tmp_path, monkeypatch):
+    """A nonzero psql exit (dead container, lost connection) aborts the
+    conversion — --allow-restore-errors only covers per-statement
+    ERROR lines, not a failed restore."""
+    src = tmp_path / "dump.sql"
+    out = tmp_path / "dump-pg16.sql"
+    _make_sql(src)
+    monkeypatch.setattr(core, "_run", _fake_docker_fatal_restore)
+    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/" + name)
+
+    result = CliRunner().invoke(
+        main,
+        [str(src), str(out), "--to", "16", "--docker-test", "--allow-restore-errors"],
+    )
 
     assert result.exit_code != 0
-    assert "empty" in result.output
+    assert "exit code" in result.output
+    assert not out.exists()
 
 
-def test_no_input_errors(tmp_path, monkeypatch):
-    """No INPUT, no stdin data and no --from-db is an error."""
-    monkeypatch.chdir(tmp_path)
-
-    result = CliRunner().invoke(main, [], input=b"")
-
-    assert result.exit_code != 0
+# --- database source ---------------------------------------------------------
 
 
-# --- database source --------------------------------------------------------
-
-
-def _fake_db_backend(monkeypatch, modules=None):
+def _fake_db_backend(monkeypatch):
     """Stub the local pg tools; fake docker still runs."""
-    _fake_docker_and_path(monkeypatch)
+    _fake_backend(monkeypatch)
     monkeypatch.setattr(core, "_db_exists", lambda db: True)
 
     def fake_dump(src_db, out_path):
         Path(out_path).write_bytes(
-            b"-- pg_dump of project db\nCREATE TABLE ir_module_module(id int);\n"
+            b"-- pg_dump of database\n"
+            b"\\restrict KEY1\n"
+            b"CREATE TABLE ir_module_module(id int);\n"
+            b"\\unrestrict KEY1\n"
         )
 
     monkeypatch.setattr(core, "_dump_db", fake_dump)
-    rows = modules if modules is not None else ["base|19.0.1.0"]
-    monkeypatch.setattr(
-        core,
-        "_pg_tool",
-        lambda tool, args: (
-            (0, "\n".join(rows).encode() + b"\n", b"")
-            if "ir_module_module" in " ".join(args)
-            else (0, b"", b"")
-        ),
-    )
 
 
 def test_from_db_exports_database(tmp_path, monkeypatch):
-    """--from-db dumps via local pg_dump and synthesizes a manifest with
-    the installed module list."""
-    _fake_db_backend(monkeypatch, modules=["base|19.0.1.0", "sale|1.0"])
-    out = tmp_path / "export.zip"
+    """--from-db dumps via local pg_dump and filters the result."""
+    _fake_db_backend(monkeypatch)
+    out = tmp_path / "export.sql"
 
-    result = CliRunner().invoke(
-        main,
-        ["--from-db", "vinha", str(out), "--to", "16", "--docker-test"],
-    )
+    result = CliRunner().invoke(main, ["--from-db", "vinha", str(out), "--to", "16"])
 
     assert result.exit_code == 0, result.output
-    with zipfile.ZipFile(out) as zf:
-        manifest = json.loads(zf.read("manifest.json"))
-        assert manifest["odoo_dump"] == "1"
-        assert manifest["db_name"] == "vinha"
-        assert manifest["modules"] == {"base": "19.0.1.0", "sale": "1.0"}
-        assert manifest["pg_version"] == "16.14"
-        assert b"CREATE TABLE ir_module_module" in zf.read("dump.sql")
+    dump = out.read_bytes()
+    assert b"CREATE TABLE ir_module_module" in dump
+    assert b"\\restrict" not in dump
 
 
 def test_from_db_missing_database_errors(tmp_path, monkeypatch):
-    """--from-db on a nonexistent database fails before docker runs."""
-    _fake_docker_and_path(monkeypatch)
+    """--from-db on a nonexistent database fails before conversion."""
+    _fake_backend(monkeypatch)
     monkeypatch.setattr(core, "_db_exists", lambda db: False)
 
-    result = CliRunner().invoke(main, ["--from-db", "ghost", str(tmp_path / "o.zip")])
+    result = CliRunner().invoke(main, ["--from-db", "ghost", str(tmp_path / "o.sql")])
 
     assert result.exit_code != 0
     assert "ghost" in result.output
@@ -452,7 +328,7 @@ def test_from_db_missing_database_errors(tmp_path, monkeypatch):
 def test_from_db_rejects_two_output_paths(tmp_path):
     """With --from-db there is no input, so only one positional is allowed."""
     result = CliRunner().invoke(
-        main, ["--from-db", "vinha", "a.zip", "b.zip", "--dry-run"]
+        main, ["--from-db", "vinha", "a.sql", "b.sql", "--dry-run"]
     )
 
     assert result.exit_code != 0
@@ -470,90 +346,48 @@ def test_from_db_dry_run_needs_no_tools(tmp_path, monkeypatch):
     assert "filter" in result.output
 
 
-def test_from_db_filestore_dir(tmp_path, monkeypatch):
-    """--from-db --filestore DIR bundles the directory into the zip."""
-    _fake_db_backend(monkeypatch)
-    fs = tmp_path / "fs"
-    (fs / "ab").mkdir(parents=True)
-    (fs / "ab" / "cd").write_bytes(b"attachment-bytes")
-    out = tmp_path / "export.zip"
-
-    result = CliRunner().invoke(
-        main,
-        [
-            "--from-db",
-            "vinha",
-            str(out),
-            "--to",
-            "16",
-            "--filestore",
-            str(fs),
-            "--docker-test",
-        ],
-    )
-
-    assert result.exit_code == 0, result.output
-    with zipfile.ZipFile(out) as zf:
-        assert zf.read("filestore/ab/cd") == b"attachment-bytes"
-
-
-# --- PG18 syntax downgrade ---------------------------------------------------
+# --- PG18 syntax downgrade ----------------------------------------------------
 
 
 def test_pg18_not_null_constraints_rewritten(tmp_path, monkeypatch):
-    """A PG18 dump using named NOT NULL table constraints converts to PG16.
+    """A PG18 dump using named NOT NULL table constraints is rewritten
+    for PG<=17: they become ALTER TABLE ... SET NOT NULL statements.
 
-    PG18 dumps ``CONSTRAINT name NOT NULL col`` / bare ``NOT NULL col``
-    as table elements; PG<=17 rejects that syntax, so the converter moves
-    the constraint into an ALTER TABLE after the CREATE TABLE.
+    COPY payloads must pass through untouched.
     """
-    src = tmp_path / "backup.zip"
-    out = tmp_path / "backup-pg16.zip"
-    with zipfile.ZipFile(src, "w") as zf:
-        zf.writestr(
-            "dump.sql",
-            "CREATE TABLE public.ir_actions (\n"
-            "    id integer NOT NULL,\n"
-            "    name jsonb NOT NULL\n"
-            ");\n"
-            "CREATE TABLE public.ir_act_server (\n"
-            "    CONSTRAINT ir_actions_name_not_null NOT NULL name,\n"
-            "    code text\n"
-            ")\n"
-            "INHERITS (public.ir_actions);\n"
-            "CREATE TABLE public.ir_act_window (\n"
-            "    NOT NULL name,\n"
-            "    view_id integer\n"
-            ")\n"
-            "INHERITS (public.ir_actions);\n"
-            "COPY public.ir_act_server (id, name, code) FROM stdin;\n"
-            "1\t{}\t-x-\n"
-            "\\.\n",
-        )
-    staged = {}
-
-    def fake(args, **kwargs):
-        if args[0] == "cp":
-            staged["dump"] = Path(args[1]).read_bytes()
-        return _fake_docker(args, **kwargs)
-
-    monkeypatch.setattr(core, "_run", fake)
-    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/" + name)
-
-    result = CliRunner().invoke(
-        main, [str(src), str(out), "--to", "16", "--docker-test"]
+    src = tmp_path / "dump.sql"
+    out = tmp_path / "dump-pg16.sql"
+    src.write_bytes(
+        b"CREATE TABLE public.ir_actions (\n"
+        b"    id integer NOT NULL,\n"
+        b"    name jsonb NOT NULL\n"
+        b");\n"
+        b"CREATE TABLE public.ir_act_server (\n"
+        b"    CONSTRAINT ir_actions_name_not_null NOT NULL name,\n"
+        b"    code text\n"
+        b")\n"
+        b"INHERITS (public.ir_actions);\n"
+        b"CREATE TABLE public.ir_act_window (\n"
+        b"    NOT NULL name,\n"
+        b"    view_id integer\n"
+        b")\n"
+        b"INHERITS (public.ir_actions);\n"
+        b"COPY public.ir_act_server (id, name, code) FROM stdin;\n"
+        b"1\t{}\t-x-\n"
+        b"\\.\n"
     )
+    monkeypatch.setattr(core.shutil, "which", lambda name: None)
+
+    result = CliRunner().invoke(main, [str(src), str(out), "--to", "16"])
 
     assert result.exit_code == 0, result.output
-    dump_in = staged["dump"]
-    assert b"CONSTRAINT ir_actions_name_not_null NOT NULL name" not in dump_in
+    dump = out.read_bytes()
+    assert b"CONSTRAINT ir_actions_name_not_null NOT NULL name" not in dump
     assert (
-        b"ALTER TABLE ONLY public.ir_act_server ALTER COLUMN name SET NOT NULL;"
-        in dump_in
+        b"ALTER TABLE ONLY public.ir_act_server ALTER COLUMN name SET NOT NULL;" in dump
     )
     assert (
-        b"ALTER TABLE ONLY public.ir_act_window ALTER COLUMN name SET NOT NULL;"
-        in dump_in
+        b"ALTER TABLE ONLY public.ir_act_window ALTER COLUMN name SET NOT NULL;" in dump
     )
     # COPY payload must pass through untouched
-    assert b"1\t{}\t-x-" in dump_in
+    assert b"1\t{}\t-x-" in dump

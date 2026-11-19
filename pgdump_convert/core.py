@@ -1,6 +1,5 @@
 """Convert a PostgreSQL dump to a different server major version."""
 
-import json
 import os
 import re
 import shutil
@@ -8,7 +7,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -167,37 +165,6 @@ def _docker_exec(container, args, **kwargs):
     return _run(["exec", container, *args], **kwargs)
 
 
-def _extract(zip_path, work):
-    """Extract dump.sql, manifest.json and filestore/ from the backup zip."""
-    with zipfile.ZipFile(zip_path) as zf:
-        for name in zf.namelist():
-            if (
-                name == "dump.sql"
-                or name == "manifest.json"
-                or name.startswith("filestore/")
-            ):
-                zf.extract(name, work)
-    if not (work / "dump.sql").exists():
-        raise click.ClickException(f"{zip_path} does not contain dump.sql")
-
-
-def _import_sql(path, work):
-    """Stage a plain-SQL dump file as ``work/dump.sql``.
-
-    Custom-format dumps (``PGDMP`` magic) are rejected: they cannot be
-    fed to ``psql`` and newer ``pg_restore`` refuses older-format files
-    anyway, so they are outside what this command can convert.
-    """
-    with open(path, "rb") as f:
-        magic = f.read(5)
-    if magic == b"PGDMP":
-        raise click.ClickException(
-            f"{path} is a custom-format pg_dump; dump-convert needs "
-            "plain SQL (pg_dump -Fp) or an Odoo zip backup"
-        )
-    shutil.copyfile(path, work / "dump.sql")
-
-
 def _filter_dump(src, dst):
     """Copy *src* to *dst* applying the registered transform rules.
 
@@ -288,31 +255,13 @@ def _restore(container, db_name, dump_file, log_path, allow_errors=False):
         )
 
 
-def _server_version(container):
-    """Return the ``server_version`` of the throwaway container."""
-    result = _docker_exec(
-        container,
-        ["psql", "-U", "postgres", "-tA", "-c", "SHOW server_version"],
-    )
-    if result.returncode != 0:
-        raise click.ClickException(
-            "could not read server_version from container: "
-            + result.stderr.decode(errors="replace")[:300]
-        )
-    version = result.stdout.decode().strip().split()[0]
-    _info(f"server_version: {version}")
-    return version
-
-
 def _docker_load(
     dump_file, work, image, db_name, container, allow_errors=False, keep=False
 ):
     """Restore *dump_file* into a throwaway *image* container.
 
-    With ``keep=False`` this is a verification step: the container is
-    removed afterwards. With ``keep=True`` it is left running for
-    inspection. Either way the zip still contains the filtered dump,
-    not a re-dump. Returns the server's ``server_version``.
+    With ``keep=False`` this is a test: the container is removed
+    afterwards. With ``keep=True`` it is left running for inspection.
     """
     _info(f"starting throwaway {image} container")
     result = _run(
@@ -334,7 +283,6 @@ def _docker_load(
         _wait_ready(container)
         _docker_exec(container, ["createdb", "-U", "postgres", db_name])
         _restore(container, db_name, dump_file, work / "psql.log", allow_errors)
-        version = _server_version(container)
     finally:
         if not keep:
             _run(["rm", "-f", container])
@@ -342,138 +290,35 @@ def _docker_load(
         _info(f"container '{container}' left running for inspection")
         _info(f"  connect: docker exec -it {container} psql -U postgres -d {db_name}")
         _info(f"  remove:  docker rm -f {container}")
-    return version
 
 
-def _write_zip(work, output, pg_version):
-    """Repack dump.sql + filestore/ + manifest.json into the output zip.
+def _check_sql(path, desc):
+    """Reject non-SQL input: zip archives and custom-format dumps."""
+    with open(path, "rb") as f:
+        magic = f.read(5)
+    if magic[:2] == b"PK":
+        raise click.ClickException(
+            f"{desc} is a zip archive; pgdump-convert expects plain SQL "
+            "(pg_dump -Fp)"
+        )
+    if magic == b"PGDMP":
+        raise click.ClickException(
+            f"{desc} is a custom-format pg_dump; pgdump-convert needs "
+            "plain SQL (pg_dump -Fp)"
+        )
+    if path.stat().st_size == 0:
+        raise click.ClickException(f"{desc} is empty")
 
-    ``output == "-"`` streams the zip to stdout.
-    """
-    manifest_path = work / "manifest.json"
-    manifest = {}
-    if manifest_path.exists():
-        manifest = json.loads(manifest_path.read_text())
-    if manifest:
-        manifest["pg_version"] = pg_version
-        manifest_path.write_text(json.dumps(manifest, indent=4))
-    to_stdout = str(output) == "-"
-    target = work / "output.zip" if to_stdout else Path(output)
-    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as zf:
-        if manifest:
-            zf.write(manifest_path, "manifest.json")
-        filestore = work / "filestore"
-        if filestore.exists():
-            for path in sorted(filestore.rglob("*")):
-                if path.is_file():
-                    zf.write(
-                        path,
-                        "filestore/" + path.relative_to(filestore).as_posix(),
-                    )
-        zf.write(work / "dump-new.sql", "dump.sql")
-    if to_stdout:
-        with open(target, "rb") as f:
+
+def _emit_sql(src, output):
+    """Write the filtered SQL to *output* (``"-"`` = stdout)."""
+    if str(output) == "-":
+        with open(src, "rb") as f:
             shutil.copyfileobj(f, sys.stdout.buffer)
-        _success("wrote zip to stdout")
+        _success("wrote sql to stdout")
     else:
+        os.replace(src, output)
         _success(f"wrote {output}")
-
-
-def convert(
-    zip_path,
-    output,
-    image="postgres:16",
-    db_name="odoo",
-    filestore_dir=None,
-    docker=None,
-    target_version="16",
-    dry_run=False,
-    allow_restore_errors=False,
-):
-    """Convert *zip_path* (Odoo zip backup or plain SQL dump).
-
-    ``zip_path == "-"`` reads the dump from stdin; ``output == "-"``
-    writes the zip to stdout. The input is staged as ``dump.sql`` — the
-    plain-SQL format Odoo zip backups use — then rewritten by the
-    registered transform rules and repacked.
-
-    ``docker`` optionally loads the produced ``dump.sql`` into a
-    throwaway container running *image*'s PostgreSQL: ``"test"``
-    verifies it restores and removes the container, ``"import"`` keeps
-    it running for inspection. The zip still contains the filtered
-    dump, not a re-dump. *filestore_dir*, when given, is bundled into
-    the output zip as ``filestore/``.
-    """
-    stdin_mode = str(zip_path) == "-"
-    stdout_mode = str(output) == "-"
-    is_zip = is_custom = None
-    if not stdin_mode:
-        zip_path = Path(zip_path)
-        is_zip = zipfile.is_zipfile(zip_path)
-        if not is_zip:
-            with open(zip_path, "rb") as f:
-                is_custom = f.read(5) == b"PGDMP"
-        if is_custom:
-            raise click.ClickException(
-                f"{zip_path} is a custom-format pg_dump; dump-convert needs "
-                "plain SQL (pg_dump -Fp) or an Odoo zip backup"
-            )
-    src_desc = "stdin" if stdin_mode else str(zip_path)
-    dst_desc = "stdout" if stdout_mode else str(output)
-    if dry_run:
-        _info(f"Would filter {src_desc} and write {dst_desc}")
-        if docker:
-            _info(f"Would load into a throwaway {image} container ({docker})")
-        if filestore_dir:
-            _info(f"Would include filestore from {filestore_dir}")
-        return
-    if docker and shutil.which("docker") is None:
-        raise click.ClickException(f"docker not found on PATH (--docker-{docker})")
-    # Work next to a real output dir (or cwd for stdout): /tmp is often a
-    # small tmpfs and dumps are huge.
-    anchor = Path.cwd() if stdout_mode else Path(output).parent
-    if not stdout_mode:
-        anchor.mkdir(parents=True, exist_ok=True)
-    container = f"pgdump-convert-{os.getpid()}"
-    with tempfile.TemporaryDirectory(dir=anchor) as tmp:
-        work = Path(tmp)
-        src = work / "input.dump"
-        if stdin_mode:
-            _info("reading dump from stdin")
-            with open(src, "wb") as f:
-                shutil.copyfileobj(sys.stdin.buffer, f)
-            is_zip = zipfile.is_zipfile(src)
-            if not is_zip:
-                with open(src, "rb") as f:
-                    is_custom = f.read(5) == b"PGDMP"
-            if is_custom:
-                raise click.ClickException(
-                    "stdin is a custom-format pg_dump; dump-convert needs "
-                    "plain SQL (pg_dump -Fp) or an Odoo zip backup"
-                )
-        else:
-            src = zip_path
-        if src.stat().st_size == 0:
-            raise click.ClickException(f"{src_desc} is empty")
-        if is_zip:
-            _extract(src, work)
-        else:
-            _import_sql(src, work)
-        if filestore_dir:
-            stage_filestore(filestore_dir, work)
-        _filter_dump(work / "dump.sql", work / "dump-new.sql")
-        pg_version = target_version
-        if docker:
-            pg_version = _docker_load(
-                work / "dump-new.sql",
-                work,
-                image,
-                db_name,
-                container,
-                allow_restore_errors,
-                keep=docker == "import",
-            )
-        _write_zip(work, output, pg_version)
 
 
 def _pg_tool(tool, args):
@@ -515,32 +360,63 @@ def _dump_db(src_db, out_path):
         )
 
 
-def _write_source_manifest(src_db, work):
-    """Synthesize an Odoo-style manifest.json for a live database export.
+def convert(
+    sql_path,
+    output,
+    image="postgres:16",
+    db_name="odoo",
+    docker=None,
+    dry_run=False,
+    allow_restore_errors=False,
+):
+    """Convert *sql_path* — a plain SQL dump — for another PG version.
 
-    ``modules`` comes from ``ir_module_module``; version fields that only
-    the Odoo server knows are left out rather than invented.
+    ``sql_path == "-"`` reads from stdin; ``output == "-"`` writes to
+    stdout. The registered transform rules rewrite the SQL; ``docker``
+    optionally loads the result into a throwaway container running
+    *image*'s PostgreSQL (``"test"`` verifies and removes it, ``"import"``
+    keeps it running for inspection).
     """
-    manifest = {"odoo_dump": "1", "db_name": src_db, "modules": {}}
-    rc, stdout, _ = _pg_tool(
-        "psql",
-        [
-            "-d",
-            src_db,
-            "-At",
-            "-c",
-            "SELECT name, latest_version FROM ir_module_module "
-            "WHERE state = 'installed'",
-        ],
-    )
-    if rc == 0:
-        modules = {}
-        for line in stdout.decode(errors="replace").splitlines():
-            parts = line.split("|")
-            if len(parts) >= 2:
-                modules[parts[0]] = parts[1]
-        manifest["modules"] = modules
-    (work / "manifest.json").write_text(json.dumps(manifest, indent=4))
+    stdin_mode = str(sql_path) == "-"
+    stdout_mode = str(output) == "-"
+    src_desc = "stdin" if stdin_mode else str(sql_path)
+    dst_desc = "stdout" if stdout_mode else str(output)
+    if dry_run:
+        _info(f"Would filter {src_desc} and write {dst_desc}")
+        if docker:
+            _info(f"Would load into a throwaway {image} container ({docker})")
+        return
+    if docker and shutil.which("docker") is None:
+        raise click.ClickException(f"docker not found on PATH (--docker-{docker})")
+    # Work next to a real output dir (or cwd for stdout): /tmp is often a
+    # small tmpfs and dumps are huge.
+    anchor = Path.cwd() if stdout_mode else Path(output).parent
+    if not stdout_mode:
+        anchor.mkdir(parents=True, exist_ok=True)
+    container = f"pgdump-convert-{os.getpid()}"
+    with tempfile.TemporaryDirectory(dir=anchor) as tmp:
+        work = Path(tmp)
+        if stdin_mode:
+            _info("reading sql from stdin")
+            src = work / "input.sql"
+            with open(src, "wb") as f:
+                shutil.copyfileobj(sys.stdin.buffer, f)
+        else:
+            src = Path(sql_path)
+        _check_sql(src, src_desc)
+        filtered = work / "filtered.sql"
+        _filter_dump(src, filtered)
+        if docker:
+            _docker_load(
+                filtered,
+                work,
+                image,
+                db_name,
+                container,
+                allow_restore_errors,
+                keep=docker == "import",
+            )
+        _emit_sql(filtered, output)
 
 
 def convert_db(
@@ -548,18 +424,15 @@ def convert_db(
     output,
     image="postgres:16",
     db_name="odoo",
-    filestore_dir=None,
     docker=None,
-    target_version="16",
     dry_run=False,
     allow_restore_errors=False,
 ):
-    """Export database *src_db* and convert it.
+    """Dump database *src_db* via local ``pg_dump`` and convert it.
 
-    The dump is produced by the local ``pg_dump`` (libpq env applies) and
-    goes through the same conversion as file input; ``docker`` optionally
-    loads the result into a throwaway ``postgres`` container (``"test"``
-    verifies and removes it, ``"import"`` keeps it running).
+    Connection settings come from the environment (libpq). ``docker``
+    optionally loads the result into a throwaway ``postgres`` container
+    (``"test"`` verifies and removes it, ``"import"`` keeps it running).
     """
     stdout_mode = str(output) == "-"
     if dry_run:
@@ -567,8 +440,6 @@ def convert_db(
         _info(f"Would pg_dump '{src_db}' and filter to {dst}")
         if docker:
             _info(f"Would load into a throwaway {image} container ({docker})")
-        if filestore_dir:
-            _info(f"Would include filestore from {filestore_dir}")
         return
     if docker and shutil.which("docker") is None:
         raise click.ClickException(f"docker not found on PATH (--docker-{docker})")
@@ -586,14 +457,11 @@ def convert_db(
         work = Path(tmp)
         _info(f"dumping '{src_db}'")
         _dump_db(src_db, work / "dump.sql")
-        if filestore_dir:
-            stage_filestore(filestore_dir, work)
-        _write_source_manifest(src_db, work)
-        _filter_dump(work / "dump.sql", work / "dump-new.sql")
-        pg_version = target_version
+        filtered = work / "filtered.sql"
+        _filter_dump(work / "dump.sql", filtered)
         if docker:
-            pg_version = _docker_load(
-                work / "dump-new.sql",
+            _docker_load(
+                filtered,
                 work,
                 image,
                 db_name,
@@ -601,15 +469,7 @@ def convert_db(
                 allow_restore_errors,
                 keep=docker == "import",
             )
-        _write_zip(work, output, pg_version)
+        _emit_sql(filtered, output)
 
 
-def stage_filestore(filestore_dir, work):
-    """Copy *filestore_dir* into ``work/filestore``."""
-    src = Path(filestore_dir)
-    if not src.is_dir():
-        raise click.ClickException(f"{filestore_dir} is not a directory")
-    shutil.copytree(src, work / "filestore")
-
-
-__all__ = ["convert", "convert_db", "stage_filestore"]
+__all__ = ["convert", "convert_db"]
