@@ -97,4 +97,3 @@ Tests use fake `docker`/pg-tool binaries; the docker helpers have also
 been exercised against real PG18→PG16 dumps.
 
 Spec and decisions: `specs/pgdump-convert.md`.
-Spec for the (deferred) Rust-core idea: `specs/rust-core.md`.

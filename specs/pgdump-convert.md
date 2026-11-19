@@ -55,9 +55,16 @@ pgdump-convert [INPUT] [OUTPUT] [--to 16] [--image IMAGE]
   Odoo-specific; plain SQL is the lower-level primitive other tools
   (incl. the osh plugin) can wrap.
 - **Docker round-trip as the default** — rejected after benchmarking:
-  the pipeline is I/O-bound (Rust transform was only ~1.3x faster) and
-  the known PG-version quirks are few. Conversion is filter-only;
-  `--docker-test`/`--docker-import` remain as optional helpers.
+  the pipeline is I/O-bound and the known PG-version quirks are few.
+  Conversion is filter-only; `--docker-test`/`--docker-import` remain
+  as optional helpers.
+- **Rust core with PyO3 bindings** — **abandoned**: implemented and
+  benchmarked on a real 2.7 GB PG18 Odoo dump, where the
+  Rust transform was only ~1.3x faster than pure Python (2.9 s vs
+  3.7 s, byte-identical output). The pipeline moves ~5.4 GB of I/O,
+  so the transform is not the bottleneck — no relevant speedup over
+  pure Python. Revisit only if profiling ever shows the transform
+  itself dominating.
 - **Custom format (`-Fc`) input** — rejected: `pg_restore` refuses
   dumps from newer `pg_dump` majors; plain SQL is the only tolerated
   direction.
