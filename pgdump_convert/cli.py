@@ -90,7 +90,7 @@ def main(
       pgdump-convert dump.sql > dump-pg16.sql
       cat dump.sql | pgdump-convert --to 16 | psql -d target
       pgdump-convert --docker-test --to 16 dump.sql > dump-pg16.sql
-      pgdump-convert --from-db minha-vinha > dump-pg16.sql
+      pgdump-convert --from-db mydb > dump-pg16.sql
     """
     image = image or f"postgres:{to}"
     if docker_test and docker_import:

@@ -306,7 +306,7 @@ def test_from_db_exports_database(tmp_path, monkeypatch):
     _fake_db_backend(monkeypatch)
     out = tmp_path / "export.sql"
 
-    result = CliRunner().invoke(main, ["--from-db", "vinha", str(out), "--to", "16"])
+    result = CliRunner().invoke(main, ["--from-db", "mydb", str(out), "--to", "16"])
 
     assert result.exit_code == 0, result.output
     dump = out.read_bytes()
@@ -328,7 +328,7 @@ def test_from_db_missing_database_errors(tmp_path, monkeypatch):
 def test_from_db_rejects_two_output_paths(tmp_path):
     """With --from-db there is no input, so only one positional is allowed."""
     result = CliRunner().invoke(
-        main, ["--from-db", "vinha", "a.sql", "b.sql", "--dry-run"]
+        main, ["--from-db", "mydb", "a.sql", "b.sql", "--dry-run"]
     )
 
     assert result.exit_code != 0
@@ -339,10 +339,10 @@ def test_from_db_dry_run_needs_no_tools(tmp_path, monkeypatch):
     """--from-db --dry-run prints the plan without docker or pg_dump."""
     monkeypatch.setattr(core.shutil, "which", lambda name: None)
 
-    result = CliRunner().invoke(main, ["--from-db", "vinha", "--to", "16", "--dry-run"])
+    result = CliRunner().invoke(main, ["--from-db", "mydb", "--to", "16", "--dry-run"])
 
     assert result.exit_code == 0, result.output
-    assert "vinha" in result.output
+    assert "mydb" in result.output
     assert "filter" in result.output
 
 
