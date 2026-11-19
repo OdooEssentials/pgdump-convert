@@ -77,9 +77,7 @@ def test_zip_backup_repackages(tmp_path, monkeypatch):
     _make_backup(src)
     _fake_docker_and_path(monkeypatch)
 
-    result = CliRunner().invoke(
-        main, [str(src), str(out), "--to", "16", "--engine", "docker"]
-    )
+    result = CliRunner().invoke(main, [str(src), str(out), "--to", "16", "--verify"])
 
     assert result.exit_code == 0, result.output
     with zipfile.ZipFile(out) as zf:
@@ -92,7 +90,8 @@ def test_zip_backup_repackages(tmp_path, monkeypatch):
         assert manifest["pg_version"] == "16.14"
         assert manifest["version"] == "19.0"
         dump = zf.read("dump.sql")
-    assert b"CREATE TABLE t(id int);" in dump
+    # --verify checks the dump loads but the zip keeps the filtered input
+    assert b"CREATE TABLE res_partner" in dump
     assert b"\\restrict" not in dump
     assert b"\\unrestrict" not in dump
 
@@ -113,21 +112,19 @@ def test_plain_sql_file_accepted(tmp_path, monkeypatch):
     out = tmp_path / "dump-pg16.zip"
     _fake_docker_and_path(monkeypatch)
 
-    result = CliRunner().invoke(
-        main, [str(src), str(out), "--to", "16", "--engine", "docker"]
-    )
+    result = CliRunner().invoke(main, [str(src), str(out), "--to", "16", "--verify"])
 
     assert result.exit_code == 0, result.output
     with zipfile.ZipFile(out) as zf:
         assert "dump.sql" in zf.namelist()
         assert "manifest.json" not in zf.namelist()
         dump = zf.read("dump.sql")
-    assert b"CREATE TABLE t(id int);" in dump
+    assert b"CREATE TABLE res_users" in dump
     assert b"\\restrict" not in dump
 
 
-def test_filter_engine_needs_no_docker(tmp_path, monkeypatch):
-    """The default engine rewrites the SQL without docker or a server.
+def test_default_needs_no_docker(tmp_path, monkeypatch):
+    """The default conversion needs no docker or a server.
 
     The manifest's pg_version is stamped with the --to target since no
     server verified it.
@@ -148,8 +145,8 @@ def test_filter_engine_needs_no_docker(tmp_path, monkeypatch):
     assert b"\\restrict" not in dump
 
 
-def test_filter_engine_from_db(tmp_path, monkeypatch):
-    """--from-db converts without docker under the default engine."""
+def test_from_db_default_needs_no_docker(tmp_path, monkeypatch):
+    """--from-db converts without docker by default."""
     _fake_db_backend(monkeypatch)
     out = tmp_path / "export.zip"
 
@@ -186,7 +183,7 @@ def test_filestore_dir_bundled(tmp_path, monkeypatch):
 
     result = CliRunner().invoke(
         main,
-        [str(src), str(out), "--filestore", str(fs), "--engine", "docker"],
+        [str(src), str(out), "--filestore", str(fs), "--verify"],
     )
 
     assert result.exit_code == 0, result.output
@@ -214,9 +211,7 @@ def test_restore_errors_fail_fast(tmp_path, monkeypatch):
     monkeypatch.setattr(core, "_run", _fake_docker_restore_errors)
     monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/" + name)
 
-    result = CliRunner().invoke(
-        main, [str(src), str(out), "--to", "16", "--engine", "docker"]
-    )
+    result = CliRunner().invoke(main, [str(src), str(out), "--to", "16", "--verify"])
 
     assert result.exit_code != 0
     assert "ERROR" in result.output
@@ -238,8 +233,7 @@ def test_allow_restore_errors_continues(tmp_path, monkeypatch):
             str(out),
             "--to",
             "16",
-            "--engine",
-            "docker",
+            "--verify",
             "--allow-restore-errors",
         ],
     )
@@ -283,8 +277,7 @@ def test_fatal_restore_error_fails_even_with_flag(tmp_path, monkeypatch):
             str(out),
             "--to",
             "16",
-            "--engine",
-            "docker",
+            "--verify",
             "--allow-restore-errors",
         ],
     )
@@ -388,7 +381,7 @@ def test_from_db_exports_database(tmp_path, monkeypatch):
 
     result = CliRunner().invoke(
         main,
-        ["--from-db", "vinha", str(out), "--to", "16", "--engine", "docker"],
+        ["--from-db", "vinha", str(out), "--to", "16", "--verify"],
     )
 
     assert result.exit_code == 0, result.output
@@ -398,7 +391,7 @@ def test_from_db_exports_database(tmp_path, monkeypatch):
         assert manifest["db_name"] == "vinha"
         assert manifest["modules"] == {"base": "19.0.1.0", "sale": "1.0"}
         assert manifest["pg_version"] == "16.14"
-        assert b"CREATE TABLE t(id int);" in zf.read("dump.sql")
+        assert b"CREATE TABLE ir_module_module" in zf.read("dump.sql")
 
 
 def test_from_db_missing_database_errors(tmp_path, monkeypatch):
@@ -451,8 +444,7 @@ def test_from_db_filestore_dir(tmp_path, monkeypatch):
             "16",
             "--filestore",
             str(fs),
-            "--engine",
-            "docker",
+            "--verify",
         ],
     )
 
@@ -504,9 +496,7 @@ def test_pg18_not_null_constraints_rewritten(tmp_path, monkeypatch):
     monkeypatch.setattr(core, "_run", fake)
     monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/" + name)
 
-    result = CliRunner().invoke(
-        main, [str(src), str(out), "--to", "16", "--engine", "docker"]
-    )
+    result = CliRunner().invoke(main, [str(src), str(out), "--to", "16", "--verify"])
 
     assert result.exit_code == 0, result.output
     dump_in = staged["dump"]

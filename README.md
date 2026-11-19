@@ -15,8 +15,7 @@ cat backup.sql | pgdump-convert --to 16 > backup-pg16.zip
 ```
 pgdump-convert [INPUT] [OUTPUT] [--to 16] [--image IMAGE]
                [--container-db NAME] [--from-db NAME] [--filestore DIR]
-               [--engine filter|docker] [--dry-run]
-               [--allow-restore-errors]
+               [--verify] [--dry-run] [--allow-restore-errors]
 ```
 
 `INPUT` defaults to **stdin** and `OUTPUT` to **stdout** — the tool is
@@ -43,19 +42,17 @@ Odoo's zip restore feeds to `psql`), `filestore/` is included when
 present in the input zip or via `--filestore DIR`, and `manifest.json`'s
 `pg_version` is updated to the target version.
 
-### Engines
+### Verification
 
-- **`filter`** (default) — streams the dump through the registered
-  transform rules and repacks. Fast (seconds on multi-GB dumps) and
-  needs no docker, but the result is _not verified_ against a server:
-  it covers the known version quirks below, nothing else.
-- **`docker`** — additionally restores the filtered dump into a
-  throwaway `postgres:<to>` container and re-dumps with that server's
-  `pg_dump`. Slower (minutes on multi-GB dumps) but proves the output
-  actually loads on the target version and is emitted in its canonical
-  dialect. Requires docker; the container is always removed afterwards.
-  Restore `ERROR:` lines fail the conversion — the dump may be
-  incomplete; pass `--allow-restore-errors` to re-dump anyway.
+By default the tool only rewrites the SQL — fast (seconds on multi-GB
+dumps), needs no docker, but covers only the known version quirks
+below. `--verify` adds a post-conversion check: the produced `dump.sql`
+is restored into a throwaway `postgres:<to>` container to prove it
+loads on the target version. The zip still contains the filtered dump,
+not a re-dump; on success the manifest's `pg_version` is the verified
+server version. Requires docker; the container is always removed
+afterwards. Restore `ERROR:` lines fail the conversion — the dump may
+be incomplete; pass `--allow-restore-errors` to accept them anyway.
 
 The transform rules rewrite constructs newer PostgreSQL clients emit
 that older servers reject:
@@ -85,9 +82,9 @@ never touched):
 pip install pgdump-convert   # or: pipx install pgdump-convert
 ```
 
-Docker is an **optional** dependency: only needed for
-`--engine docker` (the verification round-trip). The default `filter`
-engine needs nothing beyond Python.
+Docker is an **optional** dependency: only needed for `--verify` (the
+post-conversion check). The default conversion needs nothing beyond
+Python.
 
 ## Development
 
@@ -96,8 +93,8 @@ python -m venv .venv && .venv/bin/pip install -e '.[test]'
 .venv/bin/python -m pytest
 ```
 
-For engine tests, fake `docker`/pg-tool binaries are used; the docker
-path has also been exercised against real PG18→PG16 dumps.
+Tests use fake `docker`/pg-tool binaries; the `--verify` path has also
+been exercised against real PG18→PG16 dumps.
 
 Spec and decisions: `specs/pgdump-convert.md`.
 Spec for the (deferred) Rust-core idea: `specs/rust-core.md`.

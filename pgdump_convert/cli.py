@@ -46,13 +46,10 @@ from . import core
     help="Directory to bundle into the zip as filestore/.",
 )
 @click.option(
-    "--engine",
-    "engine",
-    default="filter",
-    type=click.Choice(["filter", "docker"]),
-    help="Conversion engine: 'filter' rewrites the dump's SQL only "
-    "(fast, no docker needed); 'docker' restores into a throwaway "
-    "postgres:<to> container and re-dumps, verifying compatibility.",
+    "--verify",
+    is_flag=True,
+    help="Verify the converted dump by restoring it into a throwaway "
+    "postgres:<to> container (requires docker).",
 )
 @click.option(
     "--dry-run",
@@ -74,17 +71,17 @@ def main(
     db_name,
     from_db,
     filestore_dir,
-    engine,
+    verify,
     dry_run,
     allow_restore_errors,
 ):
     """Convert a PostgreSQL dump to a different server major version.
 
-    The default 'filter' engine rewrites the dump's SQL for the target
-    version; 'docker' additionally restores it into a throwaway
-    ``postgres:<version>`` container and re-dumps from that server, so
-    the output is verified compatible. Produces an Odoo-format zip
-    backup (``dump.sql`` + ``filestore/`` + ``manifest.json``).
+    Rewrites the dump's SQL for the target version and produces an
+    Odoo-format zip backup (``dump.sql`` + ``filestore/`` +
+    ``manifest.json``). ``--verify`` additionally restores the result
+    into a throwaway ``postgres:<version>`` container to prove it
+    loads on the target.
 
     INPUT defaults to stdin and OUTPUT to stdout (``-`` for either).
     The source can be a backup zip, a plain ``pg_dump -Fp`` .sql file,
@@ -93,7 +90,7 @@ def main(
     \b
       pgdump-convert backup.zip > backup-pg16.zip
       cat dump.sql | pgdump-convert --to 16 > backup-pg16.zip
-      pgdump-convert --engine docker --to 16 backup.zip > backup-pg16.zip
+      pgdump-convert --verify --to 16 backup.zip > backup-pg16.zip
       pgdump-convert --from-db minha-vinha --filestore /path/to/filestore
     """
     image = image or f"postgres:{to}"
@@ -108,7 +105,7 @@ def main(
             image=image,
             db_name=db_name,
             filestore_dir=filestore_dir,
-            engine=engine,
+            verify=verify,
             target_version=to,
             dry_run=dry_run,
             allow_restore_errors=allow_restore_errors,
@@ -130,7 +127,7 @@ def main(
         image=image,
         db_name=db_name,
         filestore_dir=filestore_dir,
-        engine=engine,
+        verify=verify,
         target_version=to,
         dry_run=dry_run,
         allow_restore_errors=allow_restore_errors,
