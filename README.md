@@ -15,7 +15,8 @@ cat backup.sql | pgdump-convert --to 16 > backup-pg16.zip
 ```
 pgdump-convert [INPUT] [OUTPUT] [--to 16] [--image IMAGE]
                [--container-db NAME] [--from-db NAME] [--filestore DIR]
-               [--verify] [--dry-run] [--allow-restore-errors]
+               [--docker-test|--docker-import] [--dry-run]
+               [--allow-restore-errors]
 ```
 
 `INPUT` defaults to **stdin** and `OUTPUT` to **stdout** — the tool is
@@ -42,17 +43,22 @@ Odoo's zip restore feeds to `psql`), `filestore/` is included when
 present in the input zip or via `--filestore DIR`, and `manifest.json`'s
 `pg_version` is updated to the target version.
 
-### Verification
+### Docker helpers
 
 By default the tool only rewrites the SQL — fast (seconds on multi-GB
 dumps), needs no docker, but covers only the known version quirks
-below. `--verify` adds a post-conversion check: the produced `dump.sql`
-is restored into a throwaway `postgres:<to>` container to prove it
-loads on the target version. The zip still contains the filtered dump,
-not a re-dump; on success the manifest's `pg_version` is the verified
-server version. Requires docker; the container is always removed
-afterwards. Restore `ERROR:` lines fail the conversion — the dump may
-be incomplete; pass `--allow-restore-errors` to accept them anyway.
+below. Two optional flags load the produced `dump.sql` into a
+`postgres:<to>` container (the zip still contains the filtered dump,
+not a re-dump; on success the manifest's `pg_version` is the real
+server version):
+
+- **`--docker-test`** — restores the dump to prove it loads on the
+  target version, then removes the container. Restore `ERROR:` lines
+  fail the conversion — the dump may be incomplete; pass
+  `--allow-restore-errors` to accept them anyway.
+- **`--docker-import`** — same restore, but the container is left
+  running for inspection (`docker exec -it <name> psql -U postgres -d
+odoo`; remove with `docker rm -f <name>`).
 
 The transform rules rewrite constructs newer PostgreSQL clients emit
 that older servers reject:
@@ -82,8 +88,8 @@ never touched):
 pip install pgdump-convert   # or: pipx install pgdump-convert
 ```
 
-Docker is an **optional** dependency: only needed for `--verify` (the
-post-conversion check). The default conversion needs nothing beyond
+Docker is an **optional** dependency: only needed for `--docker-test`
+and `--docker-import`. The default conversion needs nothing beyond
 Python.
 
 ## Development
@@ -93,7 +99,7 @@ python -m venv .venv && .venv/bin/pip install -e '.[test]'
 .venv/bin/python -m pytest
 ```
 
-Tests use fake `docker`/pg-tool binaries; the `--verify` path has also
+Tests use fake `docker`/pg-tool binaries; the docker helpers have also
 been exercised against real PG18→PG16 dumps.
 
 Spec and decisions: `specs/pgdump-convert.md`.

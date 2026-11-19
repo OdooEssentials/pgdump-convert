@@ -46,10 +46,19 @@ from . import core
     help="Directory to bundle into the zip as filestore/.",
 )
 @click.option(
-    "--verify",
+    "--docker-test",
+    "docker_test",
     is_flag=True,
-    help="Verify the converted dump by restoring it into a throwaway "
-    "postgres:<to> container (requires docker).",
+    help="Test the converted dump by restoring it into a throwaway "
+    "postgres:<to> container, then remove the container (requires "
+    "docker).",
+)
+@click.option(
+    "--docker-import",
+    "docker_import",
+    is_flag=True,
+    help="Import the converted dump into a postgres:<to> container and "
+    "leave it running for inspection (requires docker).",
 )
 @click.option(
     "--dry-run",
@@ -71,7 +80,8 @@ def main(
     db_name,
     from_db,
     filestore_dir,
-    verify,
+    docker_test,
+    docker_import,
     dry_run,
     allow_restore_errors,
 ):
@@ -79,9 +89,10 @@ def main(
 
     Rewrites the dump's SQL for the target version and produces an
     Odoo-format zip backup (``dump.sql`` + ``filestore/`` +
-    ``manifest.json``). ``--verify`` additionally restores the result
-    into a throwaway ``postgres:<version>`` container to prove it
-    loads on the target.
+    ``manifest.json``). ``--docker-test``/``--docker-import``
+    additionally load the result into a ``postgres:<version>``
+    container — the former removes it after checking, the latter
+    leaves it running for inspection.
 
     INPUT defaults to stdin and OUTPUT to stdout (``-`` for either).
     The source can be a backup zip, a plain ``pg_dump -Fp`` .sql file,
@@ -90,10 +101,15 @@ def main(
     \b
       pgdump-convert backup.zip > backup-pg16.zip
       cat dump.sql | pgdump-convert --to 16 > backup-pg16.zip
-      pgdump-convert --verify --to 16 backup.zip > backup-pg16.zip
+      pgdump-convert --docker-test --to 16 backup.zip > backup-pg16.zip
       pgdump-convert --from-db minha-vinha --filestore /path/to/filestore
     """
     image = image or f"postgres:{to}"
+    if docker_test and docker_import:
+        raise click.UsageError(
+            "--docker-test and --docker-import are mutually exclusive"
+        )
+    docker = "test" if docker_test else "import" if docker_import else None
     if from_db:
         # No input is read, so the first positional is the OUTPUT.
         if output is not None:
@@ -105,7 +121,7 @@ def main(
             image=image,
             db_name=db_name,
             filestore_dir=filestore_dir,
-            verify=verify,
+            docker=docker,
             target_version=to,
             dry_run=dry_run,
             allow_restore_errors=allow_restore_errors,
@@ -127,7 +143,7 @@ def main(
         image=image,
         db_name=db_name,
         filestore_dir=filestore_dir,
-        verify=verify,
+        docker=docker,
         target_version=to,
         dry_run=dry_run,
         allow_restore_errors=allow_restore_errors,

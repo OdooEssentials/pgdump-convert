@@ -304,14 +304,17 @@ def _server_version(container):
     return version
 
 
-def _verify_dump(dump_file, work, image, db_name, container, allow_errors=False):
+def _docker_load(
+    dump_file, work, image, db_name, container, allow_errors=False, keep=False
+):
     """Restore *dump_file* into a throwaway *image* container.
 
-    Proves the converted dump loads on the target server version; the
-    zip still contains the filtered dump, not a re-dump. Returns the
-    server's ``server_version`` for the manifest.
+    With ``keep=False`` this is a verification step: the container is
+    removed afterwards. With ``keep=True`` it is left running for
+    inspection. Either way the zip still contains the filtered dump,
+    not a re-dump. Returns the server's ``server_version``.
     """
-    _info(f"starting throwaway {image} container for verification")
+    _info(f"starting throwaway {image} container")
     result = _run(
         [
             "run",
@@ -330,11 +333,16 @@ def _verify_dump(dump_file, work, image, db_name, container, allow_errors=False)
     try:
         _wait_ready(container)
         _docker_exec(container, ["createdb", "-U", "postgres", db_name])
-        _info("verifying dump restores cleanly")
         _restore(container, db_name, dump_file, work / "psql.log", allow_errors)
-        return _server_version(container)
+        version = _server_version(container)
     finally:
-        _run(["rm", "-f", container])
+        if not keep:
+            _run(["rm", "-f", container])
+    if keep:
+        _info(f"container '{container}' left running for inspection")
+        _info(f"  connect: docker exec -it {container} psql -U postgres -d {db_name}")
+        _info(f"  remove:  docker rm -f {container}")
+    return version
 
 
 def _write_zip(work, output, pg_version):
@@ -377,7 +385,7 @@ def convert(
     image="postgres:16",
     db_name="odoo",
     filestore_dir=None,
-    verify=False,
+    docker=None,
     target_version="16",
     dry_run=False,
     allow_restore_errors=False,
@@ -389,11 +397,12 @@ def convert(
     plain-SQL format Odoo zip backups use — then rewritten by the
     registered transform rules and repacked.
 
-    With ``verify=True`` the produced ``dump.sql`` is additionally
-    restored into a throwaway container running *image*'s PostgreSQL to
-    prove it loads on the target version (docker required). The zip
-    still contains the filtered dump, not a re-dump. *filestore_dir*,
-    when given, is bundled into the output zip as ``filestore/``.
+    ``docker`` optionally loads the produced ``dump.sql`` into a
+    throwaway container running *image*'s PostgreSQL: ``"test"``
+    verifies it restores and removes the container, ``"import"`` keeps
+    it running for inspection. The zip still contains the filtered
+    dump, not a re-dump. *filestore_dir*, when given, is bundled into
+    the output zip as ``filestore/``.
     """
     stdin_mode = str(zip_path) == "-"
     stdout_mode = str(output) == "-"
@@ -413,13 +422,13 @@ def convert(
     dst_desc = "stdout" if stdout_mode else str(output)
     if dry_run:
         _info(f"Would filter {src_desc} and write {dst_desc}")
-        if verify:
-            _info(f"Would verify against a throwaway {image} container")
+        if docker:
+            _info(f"Would load into a throwaway {image} container ({docker})")
         if filestore_dir:
             _info(f"Would include filestore from {filestore_dir}")
         return
-    if verify and shutil.which("docker") is None:
-        raise click.ClickException("docker not found on PATH (--verify)")
+    if docker and shutil.which("docker") is None:
+        raise click.ClickException(f"docker not found on PATH (--docker-{docker})")
     # Work next to a real output dir (or cwd for stdout): /tmp is often a
     # small tmpfs and dumps are huge.
     anchor = Path.cwd() if stdout_mode else Path(output).parent
@@ -454,14 +463,15 @@ def convert(
             stage_filestore(filestore_dir, work)
         _filter_dump(work / "dump.sql", work / "dump-new.sql")
         pg_version = target_version
-        if verify:
-            pg_version = _verify_dump(
+        if docker:
+            pg_version = _docker_load(
                 work / "dump-new.sql",
                 work,
                 image,
                 db_name,
                 container,
                 allow_restore_errors,
+                keep=docker == "import",
             )
         _write_zip(work, output, pg_version)
 
@@ -539,7 +549,7 @@ def convert_db(
     image="postgres:16",
     db_name="odoo",
     filestore_dir=None,
-    verify=False,
+    docker=None,
     target_version="16",
     dry_run=False,
     allow_restore_errors=False,
@@ -547,21 +557,21 @@ def convert_db(
     """Export database *src_db* and convert it.
 
     The dump is produced by the local ``pg_dump`` (libpq env applies) and
-    goes through the same conversion as file input; ``verify=True``
-    additionally restores the result into a throwaway ``postgres``
-    container (docker required).
+    goes through the same conversion as file input; ``docker`` optionally
+    loads the result into a throwaway ``postgres`` container (``"test"``
+    verifies and removes it, ``"import"`` keeps it running).
     """
     stdout_mode = str(output) == "-"
     if dry_run:
         dst = "stdout" if stdout_mode else str(output)
         _info(f"Would pg_dump '{src_db}' and filter to {dst}")
-        if verify:
-            _info(f"Would verify against a throwaway {image} container")
+        if docker:
+            _info(f"Would load into a throwaway {image} container ({docker})")
         if filestore_dir:
             _info(f"Would include filestore from {filestore_dir}")
         return
-    if verify and shutil.which("docker") is None:
-        raise click.ClickException("docker not found on PATH (--verify)")
+    if docker and shutil.which("docker") is None:
+        raise click.ClickException(f"docker not found on PATH (--docker-{docker})")
     if shutil.which("pg_dump") is None:
         raise click.ClickException("pg_dump not found on PATH")
     if shutil.which("psql") is None:
@@ -581,14 +591,15 @@ def convert_db(
         _write_source_manifest(src_db, work)
         _filter_dump(work / "dump.sql", work / "dump-new.sql")
         pg_version = target_version
-        if verify:
-            pg_version = _verify_dump(
+        if docker:
+            pg_version = _docker_load(
                 work / "dump-new.sql",
                 work,
                 image,
                 db_name,
                 container,
                 allow_restore_errors,
+                keep=docker == "import",
             )
         _write_zip(work, output, pg_version)
 

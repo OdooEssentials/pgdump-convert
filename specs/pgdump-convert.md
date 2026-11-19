@@ -18,7 +18,8 @@ CLI.
 ```
 pgdump-convert [INPUT] [OUTPUT] [--to 16] [--image IMAGE]
                [--container-db NAME] [--from-db NAME] [--filestore DIR]
-               [--verify] [--dry-run] [--allow-restore-errors]
+               [--docker-test|--docker-import] [--dry-run]
+               [--allow-restore-errors]
 ```
 
 - `INPUT` defaults to **stdin** (`-` explicit); Odoo zip backup or
@@ -38,11 +39,13 @@ pgdump-convert [INPUT] [OUTPUT] [--to 16] [--image IMAGE]
 - Default: stream the dump through the transform rules and repack —
   seconds on multi-GB dumps, no docker needed, covers only the known
   version quirks. `pg_version` is stamped with `--to`.
-- `--verify`: post-conversion check — restore the produced `dump.sql`
-  into a throwaway `postgres:<to>` container to prove it loads. The
-  zip keeps the filtered dump (not a re-dump); on success `pg_version`
-  is the verified server version. Docker is an optional dependency
-  used only here.
+- `--docker-test`: post-conversion check — restore the produced
+  `dump.sql` into a throwaway `postgres:<to>` container to prove it
+  loads, then remove the container. The zip keeps the filtered dump
+  (not a re-dump); on success `pg_version` is the real server version.
+- `--docker-import`: same restore but the container is left running
+  for inspection. Mutually exclusive with `--docker-test`. Docker is
+  an optional dependency used only by these two flags.
 - `_filter_dump` applies registered rules so version quirks are easy to
   add: `LINE_RULES` (per-line drop/rewrite via `LineRule`) and
   `BLOCK_RULES` (multi-line statement transforms via `BlockRule`
@@ -50,8 +53,9 @@ pgdump-convert [INPUT] [OUTPUT] [--to 16] [--image IMAGE]
   `\restrict`/`\unrestrict`, `SET transaction_timeout`, PG18 NOT NULL
   table constraints → `ALTER TABLE ... SET NOT NULL`. COPY payloads
   pass through untouched.
-- Under `--verify` the container is always removed (`try/finally`);
-  `--dry-run` needs no docker or pg tools.
+- Under `--docker-test` the container is always removed
+  (`try/finally`); `--docker-import` deliberately keeps it. `--dry-run`
+  needs no docker or pg tools.
 - Restore `ERROR:` lines in the psql log fail the conversion fast
   (partial restores must not be re-dumped silently);
   `--allow-restore-errors` opts out.
@@ -64,8 +68,9 @@ pgdump-convert [INPUT] [OUTPUT] [--to 16] [--image IMAGE]
 - **Docker round-trip as the default** — rejected after benchmarking:
   the pipeline is I/O-bound (Rust transform was only ~1.3x faster), and
   the known PG-version quirks are few. Conversion is filter-only by
-  default; `--verify` remains as the post-conversion check for when
-  certainty matters (e.g. before uploading to odoo.sh).
+  default; `--docker-test`/`--docker-import` remain as optional docker
+  helpers for when certainty or inspection matters (e.g. before
+  uploading to odoo.sh).
 - **Require docker-in-docker / remote docker** — out of scope; the
   tool uses the local docker daemon (`DOCKER_HOST` honored).
 

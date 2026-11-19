@@ -77,7 +77,9 @@ def test_zip_backup_repackages(tmp_path, monkeypatch):
     _make_backup(src)
     _fake_docker_and_path(monkeypatch)
 
-    result = CliRunner().invoke(main, [str(src), str(out), "--to", "16", "--verify"])
+    result = CliRunner().invoke(
+        main, [str(src), str(out), "--to", "16", "--docker-test"]
+    )
 
     assert result.exit_code == 0, result.output
     with zipfile.ZipFile(out) as zf:
@@ -112,7 +114,9 @@ def test_plain_sql_file_accepted(tmp_path, monkeypatch):
     out = tmp_path / "dump-pg16.zip"
     _fake_docker_and_path(monkeypatch)
 
-    result = CliRunner().invoke(main, [str(src), str(out), "--to", "16", "--verify"])
+    result = CliRunner().invoke(
+        main, [str(src), str(out), "--to", "16", "--docker-test"]
+    )
 
     assert result.exit_code == 0, result.output
     with zipfile.ZipFile(out) as zf:
@@ -183,7 +187,7 @@ def test_filestore_dir_bundled(tmp_path, monkeypatch):
 
     result = CliRunner().invoke(
         main,
-        [str(src), str(out), "--filestore", str(fs), "--verify"],
+        [str(src), str(out), "--filestore", str(fs), "--docker-test"],
     )
 
     assert result.exit_code == 0, result.output
@@ -211,7 +215,9 @@ def test_restore_errors_fail_fast(tmp_path, monkeypatch):
     monkeypatch.setattr(core, "_run", _fake_docker_restore_errors)
     monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/" + name)
 
-    result = CliRunner().invoke(main, [str(src), str(out), "--to", "16", "--verify"])
+    result = CliRunner().invoke(
+        main, [str(src), str(out), "--to", "16", "--docker-test"]
+    )
 
     assert result.exit_code != 0
     assert "ERROR" in result.output
@@ -233,7 +239,7 @@ def test_allow_restore_errors_continues(tmp_path, monkeypatch):
             str(out),
             "--to",
             "16",
-            "--verify",
+            "--docker-test",
             "--allow-restore-errors",
         ],
     )
@@ -277,7 +283,7 @@ def test_fatal_restore_error_fails_even_with_flag(tmp_path, monkeypatch):
             str(out),
             "--to",
             "16",
-            "--verify",
+            "--docker-test",
             "--allow-restore-errors",
         ],
     )
@@ -285,6 +291,44 @@ def test_fatal_restore_error_fails_even_with_flag(tmp_path, monkeypatch):
     assert result.exit_code != 0
     assert "exit code" in result.output
     assert not out.exists()
+
+
+def test_docker_import_keeps_container(tmp_path, monkeypatch):
+    """--docker-import restores the dump and leaves the container
+    running for inspection; the zip still gets the filtered dump."""
+    src = tmp_path / "backup.zip"
+    out = tmp_path / "backup-pg16.zip"
+    _make_backup(src)
+    calls = []
+
+    def recording_fake(args, **kwargs):
+        calls.append(args)
+        return _fake_docker(args, **kwargs)
+
+    monkeypatch.setattr(core, "_run", recording_fake)
+    monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/" + name)
+
+    result = CliRunner().invoke(
+        main, [str(src), str(out), "--to", "16", "--docker-import"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+    assert "left running" in result.output
+    assert not any(c[:2] == ["rm", "-f"] for c in calls)
+
+
+def test_docker_test_and_import_are_exclusive(tmp_path):
+    """--docker-test and --docker-import cannot be combined."""
+    src = tmp_path / "backup.zip"
+    _make_backup(src)
+
+    result = CliRunner().invoke(
+        main,
+        [str(src), str(tmp_path / "o.zip"), "--docker-test", "--docker-import"],
+    )
+
+    assert result.exit_code != 0
 
 
 def test_dry_run_needs_no_docker(tmp_path, monkeypatch):
@@ -381,7 +425,7 @@ def test_from_db_exports_database(tmp_path, monkeypatch):
 
     result = CliRunner().invoke(
         main,
-        ["--from-db", "vinha", str(out), "--to", "16", "--verify"],
+        ["--from-db", "vinha", str(out), "--to", "16", "--docker-test"],
     )
 
     assert result.exit_code == 0, result.output
@@ -444,7 +488,7 @@ def test_from_db_filestore_dir(tmp_path, monkeypatch):
             "16",
             "--filestore",
             str(fs),
-            "--verify",
+            "--docker-test",
         ],
     )
 
@@ -496,7 +540,9 @@ def test_pg18_not_null_constraints_rewritten(tmp_path, monkeypatch):
     monkeypatch.setattr(core, "_run", fake)
     monkeypatch.setattr(core.shutil, "which", lambda name: "/usr/bin/" + name)
 
-    result = CliRunner().invoke(main, [str(src), str(out), "--to", "16", "--verify"])
+    result = CliRunner().invoke(
+        main, [str(src), str(out), "--to", "16", "--docker-test"]
+    )
 
     assert result.exit_code == 0, result.output
     dump_in = staged["dump"]
