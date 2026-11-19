@@ -46,6 +46,15 @@ from . import core
     help="Directory to bundle into the zip as filestore/.",
 )
 @click.option(
+    "--engine",
+    "engine",
+    default="filter",
+    type=click.Choice(["filter", "docker"]),
+    help="Conversion engine: 'filter' rewrites the dump's SQL only "
+    "(fast, no docker needed); 'docker' restores into a throwaway "
+    "postgres:<to> container and re-dumps, verifying compatibility.",
+)
+@click.option(
     "--dry-run",
     is_flag=True,
     help="Report what would run without doing it.",
@@ -65,14 +74,16 @@ def main(
     db_name,
     from_db,
     filestore_dir,
+    engine,
     dry_run,
     allow_restore_errors,
 ):
     """Convert a PostgreSQL dump to a different server major version.
 
-    Restores the dump into a throwaway ``postgres:<version>`` docker
-    container and re-dumps from that server, so the output is guaranteed
-    compatible with the target version. Produces an Odoo-format zip
+    The default 'filter' engine rewrites the dump's SQL for the target
+    version; 'docker' additionally restores it into a throwaway
+    ``postgres:<version>`` container and re-dumps from that server, so
+    the output is verified compatible. Produces an Odoo-format zip
     backup (``dump.sql`` + ``filestore/`` + ``manifest.json``).
 
     INPUT defaults to stdin and OUTPUT to stdout (``-`` for either).
@@ -82,6 +93,7 @@ def main(
     \b
       pgdump-convert backup.zip > backup-pg16.zip
       cat dump.sql | pgdump-convert --to 16 > backup-pg16.zip
+      pgdump-convert --engine docker --to 16 backup.zip > backup-pg16.zip
       pgdump-convert --from-db minha-vinha --filestore /path/to/filestore
     """
     image = image or f"postgres:{to}"
@@ -96,6 +108,8 @@ def main(
             image=image,
             db_name=db_name,
             filestore_dir=filestore_dir,
+            engine=engine,
+            target_version=to,
             dry_run=dry_run,
             allow_restore_errors=allow_restore_errors,
         )
@@ -116,6 +130,8 @@ def main(
         image=image,
         db_name=db_name,
         filestore_dir=filestore_dir,
+        engine=engine,
+        target_version=to,
         dry_run=dry_run,
         allow_restore_errors=allow_restore_errors,
     )

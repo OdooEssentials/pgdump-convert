@@ -402,6 +402,8 @@ def convert(
     image="postgres:16",
     db_name="odoo",
     filestore_dir=None,
+    engine="filter",
+    target_version="16",
     dry_run=False,
     allow_restore_errors=False,
 ):
@@ -409,10 +411,14 @@ def convert(
 
     ``zip_path == "-"`` reads the dump from stdin; ``output == "-"``
     writes the zip to stdout. The input is staged as ``dump.sql`` — the
-    plain-SQL format Odoo zip backups use — then restored into a
-    throwaway container running *image*'s PostgreSQL and re-dumped from
-    that server. *filestore_dir*, when given, is bundled into the output
-    zip as ``filestore/``.
+    plain-SQL format Odoo zip backups use.
+
+    With ``engine="filter"`` (default) the registered transform rules
+    rewrite the SQL and the result is repacked directly — fast, but not
+    verified against a server. ``engine="docker"`` restores the dump
+    into a throwaway container running *image*'s PostgreSQL and
+    re-dumps from that server. *filestore_dir*, when given, is bundled
+    into the output zip as ``filestore/``.
     """
     stdin_mode = str(zip_path) == "-"
     stdout_mode = str(output) == "-"
@@ -431,15 +437,18 @@ def convert(
     src_desc = "stdin" if stdin_mode else str(zip_path)
     dst_desc = "stdout" if stdout_mode else str(output)
     if dry_run:
-        _info(
-            f"Would restore {src_desc} into a throwaway {image} container "
-            f"and write {dst_desc}"
-        )
+        if engine == "docker":
+            _info(
+                f"Would restore {src_desc} into a throwaway {image} "
+                f"container and write {dst_desc}"
+            )
+        else:
+            _info(f"Would filter {src_desc} and write {dst_desc}")
         if filestore_dir:
             _info(f"Would include filestore from {filestore_dir}")
         return
-    if shutil.which("docker") is None:
-        raise click.ClickException("docker not found on PATH")
+    if engine == "docker" and shutil.which("docker") is None:
+        raise click.ClickException("docker not found on PATH (engine=docker)")
     # Work next to a real output dir (or cwd for stdout): /tmp is often a
     # small tmpfs and dumps are huge.
     anchor = Path.cwd() if stdout_mode else Path(output).parent
@@ -472,7 +481,15 @@ def convert(
             _import_sql(src, work)
         if filestore_dir:
             stage_filestore(filestore_dir, work)
-        _convert_work(work, output, image, db_name, container, allow_restore_errors)
+        if engine == "filter":
+            _info(
+                "filter engine: rewriting SQL for target version "
+                f"{target_version} (no server verification)"
+            )
+            _filter_dump(work / "dump.sql", work / "dump-new.sql")
+            _write_zip(work, output, target_version)
+        else:
+            _convert_work(work, output, image, db_name, container, allow_restore_errors)
 
 
 def _pg_tool(tool, args):
@@ -548,26 +565,33 @@ def convert_db(
     image="postgres:16",
     db_name="odoo",
     filestore_dir=None,
+    engine="filter",
+    target_version="16",
     dry_run=False,
     allow_restore_errors=False,
 ):
     """Export database *src_db* and convert it.
 
     The dump is produced by the local ``pg_dump`` (libpq env applies) and
-    goes through the same throwaway-container conversion as file input.
+    goes through the same conversion as file input: ``engine="filter"``
+    (default) rewrites the SQL only, ``engine="docker"`` round-trips it
+    through a throwaway ``postgres`` container for verification.
     """
     stdout_mode = str(output) == "-"
     if dry_run:
         dst = "stdout" if stdout_mode else str(output)
-        _info(
-            f"Would pg_dump '{src_db}' and write {dst} via a throwaway "
-            f"{image} container"
-        )
+        if engine == "docker":
+            _info(
+                f"Would pg_dump '{src_db}' and write {dst} via a "
+                f"throwaway {image} container"
+            )
+        else:
+            _info(f"Would pg_dump '{src_db}' and filter to {dst}")
         if filestore_dir:
             _info(f"Would include filestore from {filestore_dir}")
         return
-    if shutil.which("docker") is None:
-        raise click.ClickException("docker not found on PATH")
+    if engine == "docker" and shutil.which("docker") is None:
+        raise click.ClickException("docker not found on PATH (engine=docker)")
     if shutil.which("pg_dump") is None:
         raise click.ClickException("pg_dump not found on PATH")
     if shutil.which("psql") is None:
@@ -585,7 +609,15 @@ def convert_db(
         if filestore_dir:
             stage_filestore(filestore_dir, work)
         _write_source_manifest(src_db, work)
-        _convert_work(work, output, image, db_name, container, allow_restore_errors)
+        if engine == "filter":
+            _info(
+                "filter engine: rewriting SQL for target version "
+                f"{target_version} (no server verification)"
+            )
+            _filter_dump(work / "dump.sql", work / "dump-new.sql")
+            _write_zip(work, output, target_version)
+        else:
+            _convert_work(work, output, image, db_name, container, allow_restore_errors)
 
 
 def stage_filestore(filestore_dir, work):
