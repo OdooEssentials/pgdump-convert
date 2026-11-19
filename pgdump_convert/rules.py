@@ -6,9 +6,12 @@ rules so new PostgreSQL-version quirks are a few lines to add:
 - ``LINE_RULES``: per-line filters. Add ``LineRule(name, pattern,
   replacement)``; ``replacement=None`` drops the line, otherwise the
   match is expanded via ``re.Match.expand`` (``\\g<name>`` groups work).
-- ``BLOCK_RULES``: multi-line statement transforms. Subclass
-  ``BlockRule``, implement ``starts``/``feed``/``emit``, and register
-  the class in ``BLOCK_RULES``.
+- ``BLOCK_RULES``: multi-line statement transforms. The common case is
+  declarative — ``StatementRule(name, start, element, emit)`` buffers
+  one statement, drops lines matching ``element``, and expands ``emit``
+  once per dropped line. Anything more complex subclasses ``BlockRule``
+  (``starts``/``feed``/``emit``) and is registered in ``BLOCK_RULES``.
+  Entries are factories: classes or callable specs, called per run.
 """
 
 import re
@@ -67,62 +70,96 @@ class BlockRule:
         raise NotImplementedError
 
 
-# PG18 emits NOT NULL as named table constraints; PG<=17 rejects them.
-PG18_NOT_NULL_RE = re.compile(
-    rb'^\s*(?:CONSTRAINT\s+\w+\s+)?NOT\s+NULL\s+("[^"]+"|\w+),?\s*$'
-)
-CREATE_TABLE_RE = re.compile(
-    rb"^CREATE\s+(?:UNLOGGED\s+|TEMP(?:ORARY)?\s+)?TABLE\s+(?:IF NOT EXISTS\s+)?"
-    rb'((?:"[^"]+"|[\w]+)(?:\.(?:"[^"]+"|[\w]+))?)\s*\('
-)
+# --- declarative statement rules --------------------------------------------
+
+END_OF_STATEMENT_RE = re.compile(rb";\s*$")
+_GROUP_RE = re.compile(rb"\\g<(\w+)>")
 
 
-class Pg18NotNull(BlockRule):
-    """Rewrite PG18 ``[CONSTRAINT name] NOT NULL col`` table elements.
+def _expand(template, groups):
+    """Expand ``\\g<name>`` placeholders in *template* from *groups*."""
+    return _GROUP_RE.sub(lambda m: groups[m.group(1).decode()], template)
 
-    They are moved into ``ALTER TABLE ONLY <table> ALTER COLUMN <col>
-    SET NOT NULL;`` statements after the CREATE TABLE.
+
+class StatementRule:
+    """Declarative transform for one buffered SQL statement.
+
+    ``start`` matches the statement's first line; its named groups
+    (e.g. ``table``) stay visible for ``emit`` expansion. ``element``
+    is matched against every buffered line — matching lines are dropped
+    and each match expands ``emit`` once (named groups from both
+    ``start`` and the element match). ``end`` marks the statement's
+    last line (default: a line ending in ``;``).
+
+    Calling the instance returns a fresh ``BlockRule`` worker, so
+    ``BLOCK_RULES`` can hold specs directly.
     """
 
-    def __init__(self):
+    def __init__(self, name, start, element, emit=None, end=END_OF_STATEMENT_RE):
+        self.name = name
+        self.start = start
+        self.element = element
+        self.emit = emit
+        self.end = end
+
+    def __call__(self):
+        return _StatementBlock(self)
+
+
+class _StatementBlock(BlockRule):
+    def __init__(self, rule):
+        self._rule = rule
+        self._start_groups = {}
         self._buf = []
-        self._table = None
-        self._cols = []
         self.dropped = 0
 
     def starts(self, line):
-        m = CREATE_TABLE_RE.match(line)
+        m = self._rule.start.match(line)
         if m is None:
             return False
-        self._table = m.group(1)
+        self._start_groups = m.groupdict()
         self._buf = []
-        self._cols = []
+        self.dropped = 0
         return True
 
     def feed(self, line):
         self._buf.append(line)
-        return line.rstrip().endswith(b";")
+        return self._rule.end.search(line) is not None
 
     def emit(self):
         out = bytearray()
+        hits = []
         for buf_line in self._buf:
-            m = PG18_NOT_NULL_RE.match(buf_line)
+            m = self._rule.element.match(buf_line)
             if m:
-                self._cols.append(m.group(1))
+                hits.append(m)
                 self.dropped += 1
                 continue
             out += buf_line
-        for col in self._cols:
-            out += (
-                b"ALTER TABLE ONLY "
-                + self._table
-                + b" ALTER COLUMN "
-                + col
-                + b" SET NOT NULL;\n"
-            )
+        if self._rule.emit is not None:
+            for m in hits:
+                groups = {**self._start_groups, **m.groupdict()}
+                out += _expand(self._rule.emit, groups)
         self._buf = []
-        self._cols = []
         return bytes(out)
 
 
-BLOCK_RULES = [Pg18NotNull]
+# PG18 emits NOT NULL as named table constraints; PG<=17 rejects them.
+# They are moved into ``ALTER TABLE ONLY <table> ALTER COLUMN <col>
+# SET NOT NULL;`` statements after the CREATE TABLE.
+PG18_NOT_NULL_RE = re.compile(
+    rb'^\s*(?:CONSTRAINT\s+\w+\s+)?NOT\s+NULL\s+(?P<col>"[^"]+"|\w+),?\s*$'
+)
+CREATE_TABLE_RE = re.compile(
+    rb"^CREATE\s+(?:UNLOGGED\s+|TEMP(?:ORARY)?\s+)?TABLE\s+(?:IF NOT EXISTS\s+)?"
+    rb'(?P<table>(?:"[^"]+"|[\w]+)(?:\.(?:"[^"]+"|[\w]+))?)\s*\('
+)
+
+BLOCK_RULES = [
+    StatementRule(
+        "pg18-not-null",
+        start=CREATE_TABLE_RE,
+        element=PG18_NOT_NULL_RE,
+        emit=(b"ALTER TABLE ONLY \\g<table> ALTER COLUMN \\g<col>" b" SET NOT NULL;\n"),
+    ),
+]

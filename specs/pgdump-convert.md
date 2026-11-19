@@ -42,8 +42,9 @@ pgdump-convert [INPUT] [OUTPUT] [--to 16] [--image IMAGE]
   fail (fatal errors are not SQL errors).
 - `_filter_dump` applies registered rules so version quirks are easy
   to add: `LINE_RULES` (per-line drop/rewrite via `LineRule`) and
-  `BLOCK_RULES` (multi-line statement transforms via `BlockRule`
-  subclasses, e.g. `Pg18NotNull`). Rules rewrite/drop:
+  `BLOCK_RULES` (mostly declarative `StatementRule` specs — start /
+  element / emit template; `BlockRule` subclasses remain for complex
+  cases). Rules rewrite/drop:
   `\restrict`/`\unrestrict`, `SET transaction_timeout`, PG18 NOT NULL
   table constraints → `ALTER TABLE ... SET NOT NULL`. COPY payloads
   pass through untouched.

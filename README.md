@@ -64,17 +64,38 @@ odoo`; remove with `docker rm -f <name>`). Mutually exclusive with
 
 ### Adding a transform rule
 
-Version-compatibility quirks live in `pgdump_convert/core.py` as two
+Version-compatibility quirks live in `pgdump_convert/rules.py` as two
 registries, both applied while streaming the dump (COPY payloads are
-never touched):
+never touched). Prefer the declarative forms — a new quirk is usually a
+few lines of regex/template, no new code:
 
 - **`LINE_RULES`** — per-line drop/rewrite. Append
   `LineRule("name", PATTERN, replacement)`; `replacement=None` drops the
   line, otherwise the match is expanded with `re.Match.expand`
   (`\g<name>` groups work).
-- **`BLOCK_RULES`** — multi-line statement transforms. Subclass
-  `BlockRule` (`starts`/`feed`/`emit`) and register the class, e.g. the
-  `Pg18NotNull` rule that rewrites CREATE TABLE bodies.
+- **`BLOCK_RULES`** — multi-line statement transforms. The common case
+  is declarative: `StatementRule(name, start=START_RE, element=ELEM_RE,
+emit=TEMPLATE)` buffers one statement (first line matching `start`,
+  last line matching `end`, default `;`), drops lines matching
+  `element`, and expands `emit` once per dropped line. Named groups
+  from both `start` and `element` are available as `\g<name>` in the
+  template — the `pg18-not-null` rule is the example:
+
+  ```python
+  StatementRule(
+      "pg18-not-null",
+      start=CREATE_TABLE_RE,     # captures ?P<table>
+      element=PG18_NOT_NULL_RE,  # captures ?P<col>
+      emit=b"ALTER TABLE ONLY \\g<table> ALTER COLUMN \\g<col>"
+           b" SET NOT NULL;\n",
+  )
+  ```
+
+  When a transform can't be expressed that way — stateful rewrites,
+  reordering, conditional logic — subclass `BlockRule`
+  (`starts`/`feed`/`emit`) and register the class in `BLOCK_RULES`.
+  Entries are factories (a class or a callable spec), instantiated
+  fresh on every run.
 
 ## Install
 
